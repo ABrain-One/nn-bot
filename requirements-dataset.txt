@@ -1,0 +1,7 @@
+huggingface_hub>=1.31,<2
+ml-dtypes>=0.5.4,<0.6
+nn-dataset>=2.2
+onnx>=1.16
+numpy>=1.24,<2
+pandas>=2.0
+torch>=2.2

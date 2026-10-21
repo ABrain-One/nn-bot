@@ -1,0 +1,11 @@
+.venv/
+build/
+install/
+log/
+__pycache__/
+*.py[cod]
+ab/nn/
+_work/
+data/
+db/
+nn-bot-results/

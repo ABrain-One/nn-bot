@@ -1,0 +1,4 @@
+numpy>=1.24,<2
+onnxruntime>=1.17
+packaging>=24
+psutil>=5.9

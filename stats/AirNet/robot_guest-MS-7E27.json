@@ -1,0 +1,215 @@
+{
+  "model_name": "AirNet",
+  "dataset": "cifar-10",
+  "device_type": "Micro-Star International Co., Ltd. MS-7E27",
+  "os_version": "Linux-6.8.0-138-generic-x86_64-with-glibc2.35",
+  "valid": true,
+  "emulator": false,
+  "iterations": 20,
+  "error_message": null,
+  "duration": 876573,
+  "unit": "NVIDIA GeForce RTX 4090",
+  "runtime": "PyTorch and ONNX Runtime",
+  "onnxruntime_provider": "CPUExecutionProvider",
+  "model_format": "onnx",
+  "input_topic": "/nn_bot/airnet_stats_image",
+  "inference_time_scope": "onnxruntime_session.run_only",
+  "model_size_bytes": 19608002,
+  "input_shape": [
+    1,
+    3,
+    128,
+    128
+  ],
+  "output_shape": [
+    1,
+    10
+  ],
+  "latency_ns": {
+    "avg": 4636819.5,
+    "min": 2126340.0,
+    "max": 6108542.0,
+    "std": 1469681.8750002186
+  },
+  "onnxruntime_latency_ns": {
+    "avg": 4636819.5,
+    "min": 2126340.0,
+    "max": 6108542.0,
+    "std": 1469681.8750002186
+  },
+  "in_dim_0": 1,
+  "in_dim_1": 3,
+  "in_dim_2": 128,
+  "in_dim_3": 128,
+  "device_analytics": {
+    "timestamp": "2026-10-19T15:27:00.096598+00:00",
+    "python_version": "3.10.12",
+    "ros_distro": "humble",
+    "cpu_cores": 16,
+    "onnxruntime_version": "1.23.2",
+    "providers": [
+      "CPUExecutionProvider"
+    ],
+    "cpu_info": {
+      "cpu_cores": 16,
+      "processors": [
+        {
+          "vendor_id": "x86_64",
+          "model": "x86_64"
+        }
+      ],
+      "torch_threads": 8,
+      "util_percent_snapshot_mean": 9.0
+    },
+    "gpu_info": {
+      "gpu_name": "NVIDIA GeForce RTX 4090",
+      "torch_cuda_available": true,
+      "torch_cuda_version": "12.8",
+      "providers_available": [
+        "AzureExecutionProvider",
+        "CPUExecutionProvider"
+      ],
+      "util_percent_snapshot_mean": 93.66666666666667
+    },
+    "timeline": [
+      {
+        "phase": "before_eval",
+        "ts": "2026-10-19T15:26:58.985755Z",
+        "sys": {
+          "total_ram_bytes": 32702369792,
+          "free_ram_bytes": 4521762816,
+          "available_ram_bytes": 10727940096,
+          "used_ram_bytes": 21401370624,
+          "cached_ram_bytes": 6207856640,
+          "ram_percent": 67.2,
+          "cpu_percent": 7.5,
+          "process_cpu_percent": 0.0,
+          "process_rss_bytes": 694513664
+        },
+        "gpus": [
+          {
+            "index": 0,
+            "name": "NVIDIA GeForce RTX 4090",
+            "driver": "580.65.06",
+            "memory_total_mb": 24564,
+            "memory_used_mb": 10871,
+            "memory_free_mb": 13188,
+            "util_percent": 94
+          }
+        ]
+      },
+      {
+        "phase": "after_cpu",
+        "ts": "2026-10-19T15:26:59.217242Z",
+        "sys": {
+          "total_ram_bytes": 32702369792,
+          "free_ram_bytes": 4513275904,
+          "available_ram_bytes": 10719453184,
+          "used_ram_bytes": 21409857536,
+          "cached_ram_bytes": 6207856640,
+          "ram_percent": 67.2,
+          "cpu_percent": 10.1,
+          "process_cpu_percent": 0.0,
+          "process_rss_bytes": 716447744
+        },
+        "gpus": [
+          {
+            "index": 0,
+            "name": "NVIDIA GeForce RTX 4090",
+            "driver": "580.65.06",
+            "memory_total_mb": 24564,
+            "memory_used_mb": 10871,
+            "memory_free_mb": 13188,
+            "util_percent": 94
+          }
+        ]
+      },
+      {
+        "phase": "after_gpu",
+        "ts": "2026-10-19T15:26:59.903452Z",
+        "sys": {
+          "total_ram_bytes": 32702369792,
+          "free_ram_bytes": 4148412416,
+          "available_ram_bytes": 10354589696,
+          "used_ram_bytes": 21755244544,
+          "cached_ram_bytes": 6227333120,
+          "ram_percent": 68.3,
+          "cpu_percent": 9.4,
+          "process_cpu_percent": 0.0,
+          "process_rss_bytes": 1151115264
+        },
+        "gpus": [
+          {
+            "index": 0,
+            "name": "NVIDIA GeForce RTX 4090",
+            "driver": "580.65.06",
+            "memory_total_mb": 24564,
+            "memory_used_mb": 11380,
+            "memory_free_mb": 12679,
+            "util_percent": 93
+          }
+        ]
+      }
+    ],
+    "profile": {
+      "top_ops": [],
+      "profiler_traces": [],
+      "peak_cpu_rss_bytes": 1151115264,
+      "peak_gpu_mb": 11380,
+      "torch_peak_gpu_allocated_mb": 37.9326171875,
+      "cpu_util_percent_samples": [
+        7.5,
+        10.1,
+        9.4
+      ],
+      "gpu_util_percent_samples": [
+        94,
+        94,
+        93
+      ],
+      "utilization_sampling": "before_eval, after_cpu, after_gpu snapshots",
+      "input_source": "explicit profiler validation tensor"
+    },
+    "onnxruntime_providers": [
+      "CPUExecutionProvider"
+    ],
+    "onnxruntime_timestamp": "2026-10-19T15:27:02.034278+00:00",
+    "torch_version": "2.9.1+cu128"
+  },
+  "cpu_duration": 3392447,
+  "cpu_min_duration": 3121386,
+  "cpu_max_duration": 3697152,
+  "cpu_std_dev": 186221.38835807913,
+  "cpu_runs": 20,
+  "cpu_error": null,
+  "gpu_duration": 876573,
+  "gpu_min_duration": 269312,
+  "gpu_max_duration": 2721792,
+  "gpu_std_dev": 1074896.8032105074,
+  "gpu_runs": 20,
+  "gpu_error": null,
+  "warmup_runs": 10,
+  "torch_cpu_threads": 8,
+  "torch_gpu_name": "NVIDIA GeForce RTX 4090",
+  "cpu_finite": true,
+  "gpu_finite": true,
+  "cpu_gpu_match": true,
+  "cpu_gpu_max_abs_error": 0.0020101070404052734,
+  "cpu_gpu_top1_match": true,
+  "cpu_gpu_rtol": 0.01,
+  "cpu_gpu_atol": 0.002,
+  "pytorch_onnx_match": true,
+  "pytorch_onnx_max_abs_error": 3.337860107421875e-06,
+  "total_ram_kb": 31935908,
+  "free_ram_kb": 4051184,
+  "available_ram_kb": 10111904,
+  "cached_kb": 6081380,
+  "task": "img-classification",
+  "metric": "accuracy",
+  "training_accuracy": 0.8657,
+  "checkpoint_repository": "NN-Dataset/checkpoints-epoch-50",
+  "checkpoint_epoch": 50,
+  "gpu_backend": "PyTorch CUDA",
+  "cpu_backend": "PyTorch CPU",
+  "profile_version": 1
+}
