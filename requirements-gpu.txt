@@ -1,0 +1,1 @@
+onnxruntime-gpu[cuda,cudnn]>=1.21

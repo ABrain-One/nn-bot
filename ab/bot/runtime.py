@@ -62,16 +62,42 @@ def preprocess_image(image, model_shape, scale=1.0 / 255.0, mean=None, std=None)
 
 
 def timing_stats(samples_ns):
-    """Return mean, min, max and sample standard deviation in nanoseconds."""
+    """Return distribution statistics and all measured nanosecond samples."""
     samples = np.asarray(samples_ns, dtype=np.float64)
     if samples.size == 0:
         raise ValueError("At least one timing sample is required")
     return {
         "avg": float(np.mean(samples)),
+        "median": float(np.median(samples)),
+        "p95": float(np.percentile(samples, 95)),
         "min": float(np.min(samples)),
         "max": float(np.max(samples)),
         "std": float(statistics.stdev(samples)) if samples.size > 1 else 0.0,
+        "samples": samples.tolist(),
     }
+
+
+def synthetic_rgb_frame(width, height, frame_index=0):
+    """Create a deterministic RGB test pattern at the requested camera dimensions."""
+    if width < 1 or height < 1:
+        raise ValueError(f"Frame dimensions must be positive, got {width}x{height}")
+    x = np.arange(width, dtype=np.uint32)[None, :]
+    y = np.arange(height, dtype=np.uint32)[:, None]
+    frame = np.empty((height, width, 3), dtype=np.uint8)
+    frame[..., 0] = (
+        (x * 255 // max(width - 1, 1) + frame_index * 3) % 256
+    ).astype(np.uint8)
+    frame[..., 1] = (y * 255 // max(height - 1, 1)).astype(np.uint8)
+    frame[..., 2] = (((x // 32 + y // 32 + frame_index) % 2) * 255).astype(np.uint8)
+    return frame
+
+
+def message_stamp_ns(message):
+    """Return a ROS message header stamp as nanoseconds, or zero when unset."""
+    stamp = getattr(getattr(message, "header", None), "stamp", None)
+    if stamp is None:
+        return 0
+    return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
 
 
 def sample_system(interval=0.1):

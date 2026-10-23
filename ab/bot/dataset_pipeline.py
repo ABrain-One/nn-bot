@@ -7,10 +7,12 @@ import gc
 import importlib
 import inspect
 import json
+import math
 import os
 import platform
 import pkgutil
 import re
+import signal
 import socket
 import statistics
 import subprocess
@@ -172,6 +174,59 @@ def _snapshot(phase):
     }
 
 
+def assess_gpu_load(gpus, utilization_limit=20.0, memory_limit_percent=20.0):
+    """Summarize GPU contention against pre-run utilization and memory thresholds."""
+    if not gpus:
+        return {
+            "available": False,
+            "busy": False,
+            "thresholds": {
+                "utilization_percent": utilization_limit,
+                "memory_used_percent": memory_limit_percent,
+            },
+            "devices": [],
+            "warnings": ["GPU usage could not be sampled (nvidia-smi unavailable or failed)"],
+        }
+
+    devices = []
+    warnings = []
+    for gpu in gpus:
+        memory_total = gpu.get("memory_total_mb")
+        memory_used = gpu.get("memory_used_mb")
+        memory_used_percent = (
+            100.0 * memory_used / memory_total if memory_total and memory_used is not None else None
+        )
+        device = {
+            **gpu,
+            "memory_used_percent": memory_used_percent,
+            "busy": False,
+        }
+        if gpu.get("util_percent") is not None and gpu["util_percent"] > utilization_limit:
+            device["busy"] = True
+            warnings.append(
+                f'GPU {gpu.get("index", "?")} utilization is {gpu["util_percent"]}% '
+                f"(limit {utilization_limit:g}%)"
+            )
+        if memory_used_percent is not None and memory_used_percent > memory_limit_percent:
+            device["busy"] = True
+            warnings.append(
+                f'GPU {gpu.get("index", "?")} memory use is {memory_used_percent:.1f}% '
+                f"({memory_used} of {memory_total} MB; limit {memory_limit_percent:g}%)"
+            )
+        devices.append(device)
+
+    return {
+        "available": True,
+        "busy": any(device["busy"] for device in devices),
+        "thresholds": {
+            "utilization_percent": utilization_limit,
+            "memory_used_percent": memory_limit_percent,
+        },
+        "devices": devices,
+        "warnings": warnings,
+    }
+
+
 def _model_output(output):
     if isinstance(output, dict):
         output = next(iter(output.values()))
@@ -206,6 +261,9 @@ def profile_model(
     iterations=20,
     warmup_runs=10,
     input_tensor=None,
+    gpu_utilization_limit=20.0,
+    gpu_memory_limit_percent=20.0,
+    gpu_busy_policy="warn",
 ):
     """Profile one transformed NN-Dataset sample on PyTorch CPU and CUDA."""
     import torch
@@ -236,14 +294,23 @@ def profile_model(
             cpu_runs.append(__import__("time").perf_counter_ns() - started)
     cpu_output = cpu_output.detach().cpu()
     cpu_finite = bool(torch.isfinite(cpu_output).all().item())
-    timeline.append(_snapshot("after_cpu"))
+    after_cpu_snapshot = _snapshot("after_cpu")
+    timeline.append(after_cpu_snapshot)
+    gpu_preflight_snapshot = after_cpu_snapshot.get("gpus")
+    gpu_preflight = assess_gpu_load(
+        gpu_preflight_snapshot,
+        utilization_limit=gpu_utilization_limit,
+        memory_limit_percent=gpu_memory_limit_percent,
+    )
 
     gpu_runs = []
     gpu_error = None
     gpu_output = None
     gpu_name = None
     torch_peak_gpu_allocated_mb = None
-    if torch.cuda.is_available():
+    if gpu_preflight["busy"] and gpu_busy_policy == "fail":
+        gpu_error = "GPU load exceeded configured limits; CUDA profiling skipped by policy"
+    elif torch.cuda.is_available():
         try:
             gpu_device = torch.device("cuda:0")
             gpu_name = torch.cuda.get_device_name(gpu_device)
@@ -302,6 +369,10 @@ def profile_model(
                 torch.equal(cpu_output.flatten(1).argmax(1), gpu_output.flatten(1).argmax(1))
             )
 
+    if "CPUExecutionProvider" not in ort.get_available_providers():
+        raise RuntimeError(
+            f"ONNX Runtime CPU provider is unavailable: {ort.get_available_providers()}"
+        )
     onnx_input = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
     onnx_output = onnx_input.run(
         None,
@@ -326,15 +397,21 @@ def profile_model(
         "cpu_duration": int(round(cpu_stats["avg"])),
         "cpu_min_duration": int(round(cpu_stats["min"])),
         "cpu_max_duration": int(round(cpu_stats["max"])),
+        "cpu_median_duration": int(round(cpu_stats["median"])),
+        "cpu_p95_duration": int(round(cpu_stats["p95"])),
         "cpu_std_dev": cpu_stats["std"],
         "cpu_runs": len(cpu_runs),
         "cpu_error": None,
         "gpu_duration": int(round(gpu_stats["avg"])) if gpu_stats else None,
         "gpu_min_duration": int(round(gpu_stats["min"])) if gpu_stats else None,
         "gpu_max_duration": int(round(gpu_stats["max"])) if gpu_stats else None,
+        "gpu_median_duration": int(round(gpu_stats["median"])) if gpu_stats else None,
+        "gpu_p95_duration": int(round(gpu_stats["p95"])) if gpu_stats else None,
         "gpu_std_dev": gpu_stats["std"] if gpu_stats else None,
         "gpu_runs": len(gpu_runs),
         "gpu_error": gpu_error,
+        "cpu_runs_ns": cpu_runs,
+        "gpu_runs_ns": gpu_runs,
         "duration": int(round(successful[fastest])),
         "unit": gpu_name if fastest == "GPU" else "CPU",
         "iterations": iterations,
@@ -350,6 +427,7 @@ def profile_model(
         "cpu_gpu_atol": 2e-3,
         "pytorch_onnx_match": pytorch_onnx_match,
         "pytorch_onnx_max_abs_error": onnx_max_abs_error,
+        "onnxruntime_consistency_providers": onnx_input.get_providers(),
         "torch_version": torch.__version__,
         "task": model_row.get("task", "img-classification"),
         "metric": model_row.get("metric", "accuracy"),
@@ -381,8 +459,6 @@ def profile_model(
             },
             "timeline": timeline,
             "profile": {
-                "top_ops": [],
-                "profiler_traces": [],
                 "peak_cpu_rss_bytes": max(process_rss) if process_rss else None,
                 "peak_gpu_mb": max(gpu_memory) if gpu_memory else None,
                 "torch_peak_gpu_allocated_mb": torch_peak_gpu_allocated_mb,
@@ -392,6 +468,8 @@ def profile_model(
                 "input_source": input_source,
             },
         },
+        "gpu_preflight": gpu_preflight,
+        "gpu_preflight_snapshot": gpu_preflight_snapshot,
     }
     del cpu_model
     gc.collect()
@@ -412,8 +490,21 @@ def _inference_command():
     return [sys.executable, "-m", "ab.bot.port", "--ros-args"]
 
 
+def _camera_emulator_command(args):
+    return [
+        sys.executable,
+        "-m",
+        "ab.bot.synthetic_camera",
+        "--ros-args",
+        "-p",
+        f"image_topic:={args.input_topic}",
+        "-p",
+        f"publish_rate_hz:={args.camera_rate_hz}",
+    ]
+
+
 def _report_path(model_name, args):
-    return args.results_dir / model_name / f"robot_{socket.gethostname()}.json"
+    return args.results_dir / model_name / f"robot_{args.dataset}_{socket.gethostname()}.json"
 
 
 def _has_complete_record(model_name, args):
@@ -438,16 +529,18 @@ def _merge_profile(model_name, args, profile):
     ort_version = analytics.get("onnxruntime_version")
     ort_providers = analytics.get("providers")
     ort_timestamp = analytics.get("timestamp")
+    ort_provider = ort_providers[0] if ort_providers else record.get("onnxruntime_provider")
     record["onnxruntime_latency_ns"] = record.get("latency_ns")
-    record["onnxruntime_provider"] = record.get("unit")
+    record["onnxruntime_provider"] = ort_provider
     record["runtime"] = "PyTorch and ONNX Runtime"
     for field in (
-        "cpu_duration", "cpu_min_duration", "cpu_max_duration", "cpu_std_dev",
+        "cpu_duration", "cpu_min_duration", "cpu_max_duration", "cpu_median_duration",
+        "cpu_p95_duration", "cpu_std_dev",
         "cpu_runs", "cpu_error", "gpu_duration", "gpu_min_duration",
-        "gpu_max_duration", "gpu_std_dev", "gpu_runs", "gpu_error", "duration",
+        "gpu_max_duration", "gpu_median_duration", "gpu_p95_duration", "gpu_std_dev",
+        "gpu_runs", "gpu_error", "duration",
         "unit", "iterations", "warmup_runs", "torch_cpu_threads", "torch_gpu_name",
         "cpu_finite", "gpu_finite", "cpu_gpu_match", "cpu_gpu_max_abs_error",
-        "cpu_gpu_top1_match",
         "cpu_gpu_top1_match",
         "cpu_gpu_rtol", "cpu_gpu_atol", "pytorch_onnx_match",
         "pytorch_onnx_max_abs_error", "total_ram_kb", "free_ram_kb",
@@ -464,16 +557,39 @@ def _merge_profile(model_name, args, profile):
     analytics["onnxruntime_providers"] = ort_providers
     analytics["onnxruntime_timestamp"] = ort_timestamp
     analytics["torch_version"] = profile["torch_version"]
-    record["valid"] = bool(
-        record.get("valid")
-        and profile["cpu_finite"]
-        and profile["gpu_finite"] is not False
-        and profile["pytorch_onnx_match"]
-        and profile["cpu_gpu_match"] is not False
-        and profile["cpu_gpu_top1_match"] is not False
+    record["inference_time_scope"] = (
+        "pytorch_cpu_forward_only" if profile["unit"] == "CPU" else "pytorch_cuda_forward_only"
     )
+    record["cpu_runs_ns"] = profile["cpu_runs_ns"]
+    record["gpu_runs_ns"] = profile["gpu_runs_ns"]
+    record["onnxruntime_consistency_providers"] = profile[
+        "onnxruntime_consistency_providers"
+    ]
+    record["gpu_preflight"] = {
+        "snapshot": profile["gpu_preflight_snapshot"],
+        "assessment": profile["gpu_preflight"],
+    }
+
+    validation_errors = []
+    if not profile["cpu_finite"]:
+        validation_errors.append("PyTorch CPU output contains non-finite values")
+    if profile["gpu_runs"] < 1:
+        validation_errors.append(profile["gpu_error"] or "PyTorch CUDA profiling did not run")
+    elif profile["gpu_finite"] is not True:
+        validation_errors.append("PyTorch CUDA output contains non-finite values")
+    if not profile["pytorch_onnx_match"]:
+        validation_errors.append("PyTorch and ONNX outputs do not match")
+    if profile["cpu_gpu_match"] is False:
+        validation_errors.append("PyTorch CPU and CUDA outputs do not match")
+    if profile["cpu_gpu_top1_match"] is False:
+        validation_errors.append("PyTorch CPU and CUDA top-1 predictions do not match")
+    if record.get("failed_frames", 0):
+        validation_errors.append(
+            f'{record["failed_frames"]} image frame(s) failed during inference'
+        )
+    record["valid"] = bool(record.get("valid") and not validation_errors)
     if not record["valid"]:
-        record["error_message"] = "Inference output failed finite-value or backend-consistency checks"
+        record["error_message"] = "; ".join(validation_errors) or "Inference validation failed"
 
     temporary_path = path.with_suffix(path.suffix + ".tmp")
     temporary_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
@@ -500,6 +616,8 @@ def _run_model(model_path, model_name, args):
         "output_topic": args.output_topic,
         "results_dir": args.results_dir.resolve(),
         "dataset": args.dataset,
+        "synthetic_input": args.emulate_camera,
+        "camera_rate_hz": args.camera_rate_hz if args.emulate_camera else 0.0,
         "warmup_runs": args.warmup_runs,
         "iterations": args.iterations,
         "input_scale": args.input_scale,
@@ -516,11 +634,27 @@ def _run_model(model_path, model_name, args):
         command.extend(["-p", f"{key}:={value}"])
 
     print(f"[RUN] {model_name}: {' '.join(command)}", flush=True)
+    camera_publisher = None
     try:
+        if args.emulate_camera:
+            camera_command = _camera_emulator_command(args)
+            print(f"[CAMERA] {' '.join(camera_command)}", flush=True)
+            camera_publisher = subprocess.Popen(camera_command)
         result = subprocess.run(command, timeout=args.model_timeout, check=False)
     except subprocess.TimeoutExpired:
         print(f"[FAIL] {model_name}: benchmark exceeded {args.model_timeout}s")
         return False
+    except OSError as error:
+        print(f"[FAIL] {model_name}: could not start ROS process: {error}")
+        return False
+    finally:
+        if camera_publisher is not None:
+            camera_publisher.send_signal(signal.SIGINT)
+            try:
+                camera_publisher.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                camera_publisher.kill()
+                camera_publisher.wait()
     if result.returncode != 0 or not report_path.exists():
         print(f"[FAIL] {model_name}: ROS node exited with status {result.returncode}")
         return False
@@ -538,6 +672,20 @@ def parser():
     ap.add_argument("--limit", type=int, help="Limit an --all-models run (useful for a short trial)")
     ap.add_argument("--input-topic", default="/camera/image_raw")
     ap.add_argument("--output-topic", default="/nn_bot/output")
+    ap.add_argument(
+        "--emulate-camera",
+        action="store_true",
+        help="Publish synthetic 640x480 RGB frames instead of requiring a camera",
+    )
+    ap.add_argument("--camera-rate-hz", type=float, default=30.0)
+    ap.add_argument(
+        "--gpu-busy-policy",
+        choices=("warn", "fail"),
+        default="warn",
+        help="Warn or skip profiling when a GPU exceeds the configured pre-run load limits",
+    )
+    ap.add_argument("--gpu-utilization-limit", type=float, default=20.0)
+    ap.add_argument("--gpu-memory-limit-percent", type=float, default=20.0)
     ap.add_argument("--onnx-dir", type=Path, default=Path("_work/onnx"))
     ap.add_argument("--results-dir", type=Path, default=Path("stats"))
     ap.add_argument("--export-only", action="store_true", help="Export ONNX files without starting ROS inference")
@@ -558,6 +706,15 @@ def main(args=None):
         ap.error("--limit must be at least 1")
     if args.iterations < 1 or args.warmup_runs < 0 or args.model_timeout <= 0:
         ap.error("iterations and model-timeout must be positive; warmup-runs cannot be negative")
+    if not math.isfinite(args.camera_rate_hz) or args.camera_rate_hz <= 0:
+        ap.error("--camera-rate-hz must be finite and positive")
+    if (
+        not math.isfinite(args.gpu_utilization_limit)
+        or not 0 <= args.gpu_utilization_limit <= 100
+        or not math.isfinite(args.gpu_memory_limit_percent)
+        or not 0 <= args.gpu_memory_limit_percent <= 100
+    ):
+        ap.error("GPU utilization and memory limits must be finite percentages from 0 to 100")
     if (args.input_mean is None) != (args.input_std is None):
         ap.error("--input-mean and --input-std must be given together")
 
@@ -594,7 +751,16 @@ def main(args=None):
                 hf_hub_download,
                 iterations=args.iterations,
                 warmup_runs=args.warmup_runs,
+                gpu_utilization_limit=args.gpu_utilization_limit,
+                gpu_memory_limit_percent=args.gpu_memory_limit_percent,
+                gpu_busy_policy=args.gpu_busy_policy,
             )
+            for warning in profile["gpu_preflight"]["warnings"]:
+                print(f"[WARN] {name}: {warning}", flush=True)
+            if profile["gpu_preflight"]["busy"] and args.gpu_busy_policy == "fail":
+                print(f"[FAIL] {name}: GPU became busy before CUDA profiling", flush=True)
+                failed.append(name)
+                continue
             if _run_model(model_path, name, args):
                 if _merge_profile(name, args, profile):
                     completed += 1

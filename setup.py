@@ -11,7 +11,11 @@ setup(
         ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
         ("share/" + package_name, ["package.xml"]),
     ],
-    install_requires=["setuptools", "numpy<2", "onnxruntime>=1.17"],
+    install_requires=["setuptools", "numpy<2"],
+    extras_require={
+        "cpu": ["onnxruntime>=1.17"],
+        "gpu": ["onnxruntime-gpu[cuda,cudnn]>=1.21"],
+    },
     zip_safe=True,
     maintainer="ABrain-One",
     maintainer_email="contact@abrain.one",
@@ -21,6 +25,7 @@ setup(
         "console_scripts": [
             "nn-bot=ab.bot.port:main",
             "nn-bot-pipeline=ab.bot.dataset_pipeline:main",
+            "nn-bot-camera-emulator=ab.bot.synthetic_camera:main",
         ]
     },
 )

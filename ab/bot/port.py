@@ -19,7 +19,7 @@ from rclpy.executors import SingleThreadedExecutor
 from sensor_msgs.msg import Image
 from std_msgs.msg import Float32MultiArray, MultiArrayDimension
 
-from ab.bot.runtime import device_name, preprocess_image, timing_stats
+from ab.bot.runtime import device_name, message_stamp_ns, preprocess_image, timing_stats
 
 
 class InferenceNode(Node):
@@ -30,17 +30,27 @@ class InferenceNode(Node):
 		self.declare_parameter("output_topic", "/nn_bot/output")
 		self.declare_parameter("results_dir", "stats")
 		self.declare_parameter("dataset", "custom")
+		self.declare_parameter("synthetic_input", False)
+		self.declare_parameter("camera_rate_hz", 0.0)
 		self.declare_parameter("warmup_runs", 10)
 		self.declare_parameter("iterations", 20)
 		self.declare_parameter("input_scale", 1.0 / 255.0)
 		self.declare_parameter("input_mean", Parameter.Type.DOUBLE_ARRAY)
 		self.declare_parameter("input_std", Parameter.Type.DOUBLE_ARRAY)
-		self.declare_parameter("providers", ["CPUExecutionProvider"])
+		self.declare_parameter(
+			"providers", ["CUDAExecutionProvider", "CPUExecutionProvider"]
+		)
 		self.declare_parameter("exit_after_benchmark", False)
 
 		model_path = Path(self.get_parameter("model_path").value).expanduser()
 		if not model_path.is_file():
 			raise FileNotFoundError(f"ONNX model not found: {model_path}")
+		self.synthetic_input = bool(self.get_parameter("synthetic_input").value)
+		self.camera_rate_hz = float(self.get_parameter("camera_rate_hz").value)
+		if self.synthetic_input and (
+			not math.isfinite(self.camera_rate_hz) or self.camera_rate_hz <= 0
+		):
+			raise ValueError("camera_rate_hz must be finite and positive for synthetic input")
 
 		requested_providers = list(self.get_parameter("providers").value)
 		available_providers = ort.get_available_providers()
@@ -51,7 +61,15 @@ class InferenceNode(Node):
 				f"{requested_providers}; available: {available_providers}"
 			)
 
+		if "CUDAExecutionProvider" in providers and hasattr(ort, "preload_dlls"):
+			ort.preload_dlls()
 		self.session = ort.InferenceSession(str(model_path), providers=providers)
+		active_providers = self.session.get_providers()
+		if "CUDAExecutionProvider" in providers and "CUDAExecutionProvider" not in active_providers:
+			self.get_logger().warning(
+				"CUDAExecutionProvider was requested but did not initialize; "
+				f"active providers: {', '.join(active_providers)}"
+			)
 		self.model_input = self.session.get_inputs()[0]
 		self.model_path = model_path
 		self.input_scale = float(self.get_parameter("input_scale").value)
@@ -66,6 +84,13 @@ class InferenceNode(Node):
 		self.bridge = CvBridge()
 		self.completed_warmups = 0
 		self.latencies_ns = []
+		self.end_to_end_latencies_ns = []
+		self.callback_latencies_ns = []
+		self.end_to_end_timestamp_frames = 0
+		self.callback_timestamp_frames = 0
+		self.arrival_timestamps_ns = []
+		self.failed_frames = 0
+		self.last_frame_error = None
 		self.record_saved = False
 		self.shutdown_timer = None
 		self.output_publisher = self.create_publisher(
@@ -78,10 +103,14 @@ class InferenceNode(Node):
 			10,
 		)
 		self.get_logger().info(
-			f"Loaded {model_path.name}; providers: {', '.join(self.session.get_providers())}"
+			f"Loaded {model_path.name}; providers: {', '.join(active_providers)}"
 		)
 
 	def on_image(self, message):
+		callback_started_ns = time.perf_counter_ns()
+		arrival_ros_ns = self.get_clock().now().nanoseconds
+		source_stamp_ns = message_stamp_ns(message)
+		self.arrival_timestamps_ns.append(callback_started_ns)
 		try:
 			image = self.bridge.imgmsg_to_cv2(message, desired_encoding="rgb8")
 			model_tensor = preprocess_image(
@@ -107,6 +136,8 @@ class InferenceNode(Node):
 			]
 			message_out.data = output.reshape(-1).tolist()
 			self.output_publisher.publish(message_out)
+			published_ros_ns = self.get_clock().now().nanoseconds
+			callback_elapsed_ns = time.perf_counter_ns() - callback_started_ns
 
 			if self.completed_warmups < self.warmup_runs:
 				self.completed_warmups += 1
@@ -114,12 +145,24 @@ class InferenceNode(Node):
 
 			if len(self.latencies_ns) < self.iterations:
 				self.latencies_ns.append(elapsed_ns)
+				self.callback_latencies_ns.append(callback_elapsed_ns)
+				if source_stamp_ns > 0 and published_ros_ns >= source_stamp_ns:
+					self.end_to_end_latencies_ns.append(published_ros_ns - source_stamp_ns)
+					self.end_to_end_timestamp_frames += 1
+				elif published_ros_ns >= arrival_ros_ns:
+					self.end_to_end_latencies_ns.append(published_ros_ns - arrival_ros_ns)
+					self.callback_timestamp_frames += 1
+				else:
+					self.end_to_end_latencies_ns.append(callback_elapsed_ns)
+					self.callback_timestamp_frames += 1
 				if len(self.latencies_ns) == self.iterations and not self.record_saved:
 					self.save_record(list(model_tensor.shape), list(output.shape))
 					self.record_saved = True
 					if self.get_parameter("exit_after_benchmark").value:
 						self.shutdown_timer = self.create_timer(0.1, self.stop_after_benchmark)
 		except Exception as error:
+			self.failed_frames += 1
+			self.last_frame_error = f"{type(error).__name__}: {error}"
 			self.get_logger().error(f"Inference failed: {error}")
 
 	def save_record(self, input_shape, output_shape):
@@ -128,11 +171,22 @@ class InferenceNode(Node):
 			"model_name": self.model_path.stem,
 			"dataset": str(self.get_parameter("dataset").value),
 			"device_type": device_type,
+			"board": device_type,
+			"architecture": platform.machine(),
 			"os_version": platform.platform(),
-			"valid": True,
-			"emulator": False,
+			"valid": self.failed_frames == 0,
+			"emulator": self.synthetic_input,
+			"input_source": "synthetic_camera" if self.synthetic_input else "sensor_topic",
+			"camera_rate_hz": self.camera_rate_hz if self.synthetic_input else None,
+			"observed_input_rate_hz": (
+				1_000_000_000 / float(np.mean(np.diff(self.arrival_timestamps_ns)))
+				if len(self.arrival_timestamps_ns) > 1
+				else None
+			),
 			"iterations": self.iterations,
-			"error_message": None,
+			"error_message": self.last_frame_error,
+			"failed_frames": self.failed_frames,
+			"last_frame_error": self.last_frame_error,
 			"duration": int(round(float(np.mean(self.latencies_ns)))),
 			"unit": self.session.get_providers()[0],
 			"runtime": "ONNX Runtime",
@@ -145,6 +199,13 @@ class InferenceNode(Node):
 			"output_shape": output_shape,
 			"latency_ns": timing_stats(self.latencies_ns),
 			"onnxruntime_latency_ns": timing_stats(self.latencies_ns),
+			"end_to_end_latency_ns": timing_stats(self.end_to_end_latencies_ns),
+			"end_to_end_latency_scope": (
+				"image_header_stamp_to_output_publish_with_callback_fallback"
+			),
+			"end_to_end_header_timestamp_frames": self.end_to_end_timestamp_frames,
+			"end_to_end_callback_timestamp_frames": self.callback_timestamp_frames,
+			"callback_latency_ns": timing_stats(self.callback_latencies_ns),
 			"in_dim_0": input_shape[0],
 			"in_dim_1": input_shape[1],
 			"in_dim_2": input_shape[2],
@@ -160,7 +221,8 @@ class InferenceNode(Node):
 		}
 		output_dir = self.results_dir / self.model_path.stem
 		output_dir.mkdir(parents=True, exist_ok=True)
-		output_path = output_dir / f"robot_{socket.gethostname()}.json"
+		dataset = str(self.get_parameter("dataset").value)
+		output_path = output_dir / f"robot_{dataset}_{socket.gethostname()}.json"
 		temporary_path = output_path.with_suffix(output_path.suffix + ".tmp")
 		temporary_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
 		temporary_path.replace(output_path)

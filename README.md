@@ -24,6 +24,25 @@ source .venv/bin/activate
 python -m pip install -r requirements.txt
 ```
 
+For a supported NVIDIA CUDA environment, replace the CPU ONNX Runtime wheel
+with the GPU build so the ROS node and ONNX consistency check can use
+`CUDAExecutionProvider`:
+
+```bash
+python -m pip uninstall -y onnxruntime
+python -m pip install -r requirements-gpu.txt
+```
+
+The pipeline requests CUDA first and falls back to CPU if CUDA is unavailable.
+Confirm that CUDA is listed by `onnxruntime.get_available_providers()` before
+interpreting ONNX timings as GPU measurements. Jetson and other ARM devices may
+need the ONNX Runtime wheel supplied for their JetPack/CUDA release instead of
+the standard PyPI package.
+
+The ROS package exposes runtime choices as extras for installs that use pip:
+`pip install '.[cpu]'` or `pip install '.[gpu]'`. The regular requirements files
+remain an alternative for environment-based installs.
+
 For the NN-Dataset export pipeline, install its additional dependencies. On a
 CPU-only machine, reinstall the CPU PyTorch wheels after them so dependency
 resolution does not leave a CUDA build in the environment:
@@ -74,7 +93,7 @@ resizes with nearest-neighbor sampling, converts RGB pixels to float32 in
 `[0, 1]`, and supports NCHW or NHWC input layouts.
 
 Results are written to
-`stats/<model>/robot_<hostname>.json` by default. Select an execution
+`stats/<model>/robot_<dataset>_<hostname>.json` by default. Select an execution
 provider with the `providers` parameter, for example
 `-p providers:="[CUDAExecutionProvider, CPUExecutionProvider]"` when supported
 by the installed ONNX Runtime build.
@@ -112,11 +131,52 @@ when PyTorch reports an available CUDA device. CPU time uses a monotonic host
 clock; CUDA time uses events with synchronization after each run. It also runs
 the same input through the exported ONNX model and compares outputs. CPU/CUDA
 logits are checked with `rtol=0.01, atol=0.002`; PyTorch/ONNX outputs use
-`rtol=0.001, atol=0.0001`. Finite-value and top-class agreement are recorded.
+`rtol=0.001, atol=0.0001`. The PyTorch/ONNX correctness check uses the CPU ONNX
+provider as a stable reference; the ROS ONNX measurement prefers CUDA when
+available and records its active provider. Finite-value and top-class agreement
+are recorded. Every timing summary keeps its individual samples and includes
+mean, median, and p95.
 
-The ROS node separately measures 20 live-message ONNX Runtime `session.run()`
+Before profiling each model, the pipeline samples NVIDIA GPU utilization and
+memory use. It warns by default when utilization or memory use exceeds 20%;
+set `--gpu-utilization-limit` and `--gpu-memory-limit-percent` to adjust those
+limits. Use `--gpu-busy-policy fail` to skip the profile and mark the model as
+failed when a measured threshold is exceeded. When `nvidia-smi` is unavailable,
+the record notes that GPU load could not be checked.
+
+The ROS node separately measures 20 image-message ONNX Runtime `session.run()`
 calls after 10 warm-ups. Preprocessing, ROS transport, and publishing are outside
-that latency interval. CPU/GPU utilization and system/GPU memory are snapshots
+that session-only latency interval. For a reproducible ROS image-stream
+emulation, add `--emulate-camera`; the pipeline starts a separate ROS 2 publisher
+that sends stamped 640x480 RGB test frames at 30 Hz by default. Set
+`--camera-rate-hz` to change the rate. For example:
+
+```bash
+python -m ab.bot.dataset_pipeline --model AirNet \
+	--dataset cifar-10 \
+	--emulate-camera \
+	--camera-rate-hz 30
+```
+
+The inference node records `end_to_end_latency_ns` from the image header stamp
+through publishing the model output, covering input transport/queueing and the
+full callback; it also records `callback_latency_ns` from callback entry through
+output publishing. When a message has no usable timestamp or the ROS clocks are
+inconsistent, the end-to-end metric falls back to callback timing, with counts
+of each source recorded. Synthetic runs record `emulator: true`, the requested
+camera rate, and board identity; a normal camera-topic run records
+`emulator: false`. These figures measure the host and ROS path under the
+configured synthetic stream, not camera optics, sensor acquisition, or the
+physical robot's environment.
+
+For real-robot runs, omit `--emulate-camera` and point `--input-topic` at the
+physical camera. The record schema stays the same with `emulator: false`; the
+message-stamp-to-output metric then includes the camera driver and ROS delivery
+delays to the inference callback. Run navigation/control nodes as usual during
+the measurement when you want to capture their shared-system impact. Preserve
+the GPU preflight warnings and load snapshot when comparing runs.
+
+CPU/GPU utilization and system/GPU memory are snapshots
 before and after each backend, not continuous averages; the record labels them
 accordingly. If PyTorch CUDA is unavailable or fails, the CPU results are kept
 and the GPU error is recorded rather than represented as a zero latency.
@@ -191,9 +251,14 @@ profiles.
 The runner exports ONNX models under `_work/onnx/<dataset>/`, then starts the
 ROS inference node for each model. It listens to the live image topic, warms up
 the model, measures the configured number of frames, and writes a record to
-`stats/<model>/robot_<hostname>.json` before advancing. Each record includes its
-dataset. Since this layout is flat, running the same model on the same host with
-a different dataset replaces that model's previous record. Existing valid
+`stats/<model>/robot_<dataset>_<hostname>.json` before advancing. Failed image
+frames are counted and make the record invalid. The pipeline record is also
+invalid unless the PyTorch CUDA profile completes and passes output checks.
+`duration` in a pipeline record is the selected PyTorch CPU or CUDA forward
+time; `inference_time_scope` identifies which timing it contains. The separate
+`onnxruntime_latency_ns` field retains the ROS node's ONNX `session.run()` timing.
+Dataset-specific filenames keep results for different datasets separate.
+Existing valid
 records for the selected dataset are skipped when resuming; pass `--force` to
 export and benchmark again.
 The default normalization is dataset-specific for CIFAR-10, CIFAR-100, MNIST,
