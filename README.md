@@ -104,6 +104,9 @@ publishing that output.
 `onnxruntime_latency_ns` separately reports only the selected ONNX Runtime
 provider's `session.run()` latency. Use the NN-Dataset pipeline below for the
 PyTorch CPU/CUDA profile and output-consistency checks.
+The `input_shape` field retains the model's actual tensor layout; `in_dim_0`
+through `in_dim_3` use NN-Lite's batch, height, width, channels order so records
+can be merged with that schema.
 
 ## Run NN-Dataset Models
 

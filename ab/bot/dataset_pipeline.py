@@ -439,9 +439,9 @@ def profile_model(
         "available_ram_kb": memory.get("available_ram_bytes", 0) // 1024,
         "cached_kb": memory.get("cached_ram_bytes", 0) // 1024,
         "in_dim_0": input_shape[0],
-        "in_dim_1": input_shape[1],
-        "in_dim_2": input_shape[2],
-        "in_dim_3": input_shape[3],
+        "in_dim_1": input_shape[2],
+        "in_dim_2": input_shape[3],
+        "in_dim_3": input_shape[1],
         "device_analytics": {
             "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "cpu_info": {

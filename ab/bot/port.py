@@ -177,6 +177,10 @@ class InferenceNode(Node):
 
 	def save_record(self, input_shape, output_shape):
 		device_type = device_name()
+		if input_shape[1] in (1, 3, 4):
+			input_batch, input_channels, input_height, input_width = input_shape
+		else:
+			input_batch, input_height, input_width, input_channels = input_shape
 		record = {
 			"model_name": self.model_path.stem,
 			"dataset": str(self.get_parameter("dataset").value),
@@ -219,10 +223,10 @@ class InferenceNode(Node):
 			"end_to_end_header_timestamp_frames": self.end_to_end_timestamp_frames,
 			"end_to_end_callback_timestamp_frames": self.callback_timestamp_frames,
 			"callback_latency_ns": timing_stats(self.callback_latencies_ns),
-			"in_dim_0": input_shape[0],
-			"in_dim_1": input_shape[1],
-			"in_dim_2": input_shape[2],
-			"in_dim_3": input_shape[3],
+			"in_dim_0": input_batch,
+			"in_dim_1": input_height,
+			"in_dim_2": input_width,
+			"in_dim_3": input_channels,
 			"device_analytics": {
 				"timestamp": datetime.now(timezone.utc).isoformat(),
 				"python_version": platform.python_version(),
