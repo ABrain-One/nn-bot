@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from ab.bot.runtime import (
     device_name,
+    l2_normalize,
     message_stamp_ns,
     preprocess_image,
     synthetic_rgb_frame,
@@ -33,6 +34,17 @@ class RuntimeTests(unittest.TestCase):
     def test_rejects_ambiguous_model_input_shape(self):
         with self.assertRaises(ValueError):
             preprocess_image(np.zeros((2, 2, 3)), [1, 7, 8, 9])
+
+    def test_l2_normalizes_output(self):
+        result = l2_normalize(np.array([[3.0, 4.0]], dtype=np.float32))
+
+        np.testing.assert_allclose(result, [[0.6, 0.8]])
+        self.assertAlmostEqual(float(np.linalg.norm(result)), 1.0)
+
+    def test_l2_normalization_preserves_zero_output(self):
+        result = l2_normalize(np.zeros((1, 3), dtype=np.float32))
+
+        np.testing.assert_array_equal(result, np.zeros((1, 3), dtype=np.float32))
 
     def test_timing_statistics_use_nanoseconds(self):
         self.assertEqual(

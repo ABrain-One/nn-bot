@@ -100,7 +100,8 @@ class DatasetPipelineTests(unittest.TestCase):
 			path.write_text(json.dumps({
 				"valid": True,
 				"dataset": "cifar-10",
-				"latency_ns": {"avg": 123.0},
+				"latency_ns": {"avg": 456.0},
+				"onnxruntime_latency_ns": {"avg": 123.0},
 				"device_analytics": {
 					"timestamp": "ort-time",
 					"onnxruntime_version": "test-ort",

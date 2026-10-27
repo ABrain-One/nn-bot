@@ -98,8 +98,11 @@ provider with the `providers` parameter, for example
 `-p providers:="[CUDAExecutionProvider, CPUExecutionProvider]"` when supported
 by the installed ONNX Runtime build.
 
-This standalone ONNX node reports only the selected ONNX Runtime provider's
-`session.run()` latency. Use the NN-Dataset pipeline below for the comparable
+The standalone ONNX node's primary `latency_ns` measures image conversion and
+preprocessing through ONNX inference, L2-normalization of its output, and
+publishing that output.
+`onnxruntime_latency_ns` separately reports only the selected ONNX Runtime
+provider's `session.run()` latency. Use the NN-Dataset pipeline below for the
 PyTorch CPU/CUDA profile and output-consistency checks.
 
 ## Run NN-Dataset Models
@@ -144,11 +147,12 @@ limits. Use `--gpu-busy-policy fail` to skip the profile and mark the model as
 failed when a measured threshold is exceeded. When `nvidia-smi` is unavailable,
 the record notes that GPU load could not be checked.
 
-The ROS node separately measures 20 image-message ONNX Runtime `session.run()`
-calls after 10 warm-ups. Preprocessing, ROS transport, and publishing are outside
-that session-only latency interval. For a reproducible ROS image-stream
-emulation, add `--emulate-camera`; the pipeline starts a separate ROS 2 publisher
-that sends stamped 640x480 RGB test frames at 30 Hz by default. Set
+The ROS node measures 20 image-message inferences after 10 warm-ups. Its primary
+`latency_ns` interval starts before image conversion/preprocessing and ends after
+publishing the L2-normalized model output; `onnxruntime_latency_ns` records the
+nested `session.run()` interval alone. For a reproducible ROS image-stream emulation,
+add `--emulate-camera`; the pipeline starts a separate ROS 2 publisher that
+sends stamped 640x480 RGB test frames at 30 Hz by default. Set
 `--camera-rate-hz` to change the rate. For example:
 
 ```bash

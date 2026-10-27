@@ -530,7 +530,9 @@ def _merge_profile(model_name, args, profile):
     ort_providers = analytics.get("providers")
     ort_timestamp = analytics.get("timestamp")
     ort_provider = ort_providers[0] if ort_providers else record.get("onnxruntime_provider")
-    record["onnxruntime_latency_ns"] = record.get("latency_ns")
+    record["onnxruntime_latency_ns"] = record.get(
+        "onnxruntime_latency_ns", record.get("latency_ns")
+    )
     record["onnxruntime_provider"] = ort_provider
     record["runtime"] = "PyTorch and ONNX Runtime"
     for field in (

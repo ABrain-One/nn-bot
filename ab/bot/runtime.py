@@ -61,6 +61,15 @@ def preprocess_image(image, model_shape, scale=1.0 / 255.0, mean=None, std=None)
     return np.expand_dims(tensor, axis=0).astype(np.float32, copy=False)
 
 
+def l2_normalize(output):
+    """Return a float32 output normalized to unit L2 norm, preserving zero vectors."""
+    output = np.asarray(output, dtype=np.float32)
+    norm = np.linalg.norm(output)
+    if norm == 0:
+        return output
+    return output / norm
+
+
 def timing_stats(samples_ns):
     """Return distribution statistics and all measured nanosecond samples."""
     samples = np.asarray(samples_ns, dtype=np.float64)

@@ -19,7 +19,13 @@ from rclpy.executors import SingleThreadedExecutor
 from sensor_msgs.msg import Image
 from std_msgs.msg import Float32MultiArray, MultiArrayDimension
 
-from ab.bot.runtime import device_name, message_stamp_ns, preprocess_image, timing_stats
+from ab.bot.runtime import (
+	device_name,
+	l2_normalize,
+	message_stamp_ns,
+	preprocess_image,
+	timing_stats,
+)
 
 
 class InferenceNode(Node):
@@ -84,6 +90,7 @@ class InferenceNode(Node):
 		self.bridge = CvBridge()
 		self.completed_warmups = 0
 		self.latencies_ns = []
+		self.onnxruntime_latencies_ns = []
 		self.end_to_end_latencies_ns = []
 		self.callback_latencies_ns = []
 		self.end_to_end_timestamp_frames = 0
@@ -112,6 +119,7 @@ class InferenceNode(Node):
 		source_stamp_ns = message_stamp_ns(message)
 		self.arrival_timestamps_ns.append(callback_started_ns)
 		try:
+			started = time.perf_counter_ns()
 			image = self.bridge.imgmsg_to_cv2(message, desired_encoding="rgb8")
 			model_tensor = preprocess_image(
 				image,
@@ -120,10 +128,10 @@ class InferenceNode(Node):
 				self.input_mean,
 				self.input_std,
 			)
-			started = time.perf_counter_ns()
+			session_started = time.perf_counter_ns()
 			outputs = self.session.run(None, {self.model_input.name: model_tensor})
-			elapsed_ns = time.perf_counter_ns() - started
-			output = np.asarray(outputs[0], dtype=np.float32)
+			session_elapsed_ns = time.perf_counter_ns() - session_started
+			output = l2_normalize(outputs[0])
 
 			message_out = Float32MultiArray()
 			message_out.layout.dim = [
@@ -136,6 +144,7 @@ class InferenceNode(Node):
 			]
 			message_out.data = output.reshape(-1).tolist()
 			self.output_publisher.publish(message_out)
+			elapsed_ns = time.perf_counter_ns() - started
 			published_ros_ns = self.get_clock().now().nanoseconds
 			callback_elapsed_ns = time.perf_counter_ns() - callback_started_ns
 
@@ -145,6 +154,7 @@ class InferenceNode(Node):
 
 			if len(self.latencies_ns) < self.iterations:
 				self.latencies_ns.append(elapsed_ns)
+				self.onnxruntime_latencies_ns.append(session_elapsed_ns)
 				self.callback_latencies_ns.append(callback_elapsed_ns)
 				if source_stamp_ns > 0 and published_ros_ns >= source_stamp_ns:
 					self.end_to_end_latencies_ns.append(published_ros_ns - source_stamp_ns)
@@ -193,12 +203,15 @@ class InferenceNode(Node):
 			"onnxruntime_provider": self.session.get_providers()[0],
 			"model_format": "onnx",
 			"input_topic": str(self.get_parameter("input_topic").value),
-			"inference_time_scope": "onnxruntime_session.run_only",
+			"inference_time_scope": (
+				"image_preprocessing_through_l2_normalization_and_output_publish"
+			),
+			"onnxruntime_latency_scope": "session.run_only",
 			"model_size_bytes": self.model_path.stat().st_size,
 			"input_shape": input_shape,
 			"output_shape": output_shape,
 			"latency_ns": timing_stats(self.latencies_ns),
-			"onnxruntime_latency_ns": timing_stats(self.latencies_ns),
+			"onnxruntime_latency_ns": timing_stats(self.onnxruntime_latencies_ns),
 			"end_to_end_latency_ns": timing_stats(self.end_to_end_latencies_ns),
 			"end_to_end_latency_scope": (
 				"image_header_stamp_to_output_publish_with_callback_fallback"
