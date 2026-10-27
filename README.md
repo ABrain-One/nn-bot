@@ -264,9 +264,10 @@ the model, measures the configured number of frames, and writes a record to
 frames are counted and make the record invalid. The pipeline record is also
 valid when at least one PyTorch backend completes and its output passes the
 ONNX consistency check; CUDA is optional when unavailable or unsupported.
-`duration` in a pipeline record is the selected PyTorch CPU or CUDA forward
-time among backends that pass validation; `inference_time_scope` identifies
-which timing it contains. The separate
+`duration`, `unit`, and `inference_time_scope` in the merged record retain the
+ROS image-to-published-output measurement. The validated PyTorch forward-pass
+summary is kept separately in `pytorch_duration`, `pytorch_unit`, and
+`pytorch_inference_time_scope`, alongside the per-backend CPU/CUDA metrics. The
 `onnxruntime_latency_ns` field retains the ROS node's ONNX `session.run()` timing.
 Dataset-specific filenames keep results for different datasets separate.
 Existing valid

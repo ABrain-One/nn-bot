@@ -100,6 +100,9 @@ class DatasetPipelineTests(unittest.TestCase):
 			path.write_text(json.dumps({
 				"valid": True,
 				"dataset": "cifar-10",
+				"duration": 456,
+				"unit": "Robot Hardware",
+				"inference_time_scope": "image_preprocessing_through_output_publish",
 				"latency_ns": {"avg": 456.0},
 				"onnxruntime_latency_ns": {"avg": 123.0},
 				"device_analytics": {
@@ -141,7 +144,17 @@ class DatasetPipelineTests(unittest.TestCase):
 			self.assertEqual(record["cpu_duration"], 200)
 			self.assertEqual(record["gpu_duration"], 100)
 			self.assertEqual(record["gpu_p95_duration"], 105)
-			self.assertEqual(record["inference_time_scope"], "pytorch_cuda_forward_only")
+			self.assertEqual(record["duration"], 456)
+			self.assertEqual(record["unit"], "Robot Hardware")
+			self.assertEqual(
+				record["inference_time_scope"],
+				"image_preprocessing_through_output_publish",
+			)
+			self.assertEqual(record["pytorch_duration"], 100)
+			self.assertEqual(record["pytorch_unit"], "Test GPU")
+			self.assertEqual(
+				record["pytorch_inference_time_scope"], "pytorch_cuda_forward_only"
+			)
 			self.assertEqual(record["onnxruntime_provider"], "CPUExecutionProvider")
 			self.assertEqual(
 				record["onnxruntime_consistency_providers"],
@@ -160,9 +173,10 @@ class DatasetPipelineTests(unittest.TestCase):
 			self.assertTrue(_merge_profile("AirNet", args, profile))
 			record = json.loads(path.read_text())
 			self.assertTrue(record["valid"])
-			self.assertEqual(record["duration"], 100)
-			self.assertEqual(record["unit"], "Test GPU")
-			self.assertEqual(record["inference_time_scope"], "pytorch_cuda_forward_only")
+			self.assertEqual(record["duration"], 456)
+			self.assertEqual(record["unit"], "Robot Hardware")
+			self.assertEqual(record["pytorch_duration"], 100)
+			self.assertEqual(record["pytorch_unit"], "Test GPU")
 
 	def test_merge_profile_accepts_correct_cpu_without_cuda(self):
 		with TemporaryDirectory() as directory:
@@ -172,6 +186,9 @@ class DatasetPipelineTests(unittest.TestCase):
 			path.write_text(json.dumps({
 				"valid": True,
 				"dataset": "cifar-10",
+				"duration": 123,
+				"unit": "Robot Hardware",
+				"inference_time_scope": "image_preprocessing_through_output_publish",
 				"failed_frames": 2,
 				"last_frame_error": "RuntimeError: dropped frame",
 				"latency_ns": {"avg": 123.0},
@@ -207,7 +224,7 @@ class DatasetPipelineTests(unittest.TestCase):
 			self.assertFalse(_merge_profile("AirNet", args, profile))
 			record = json.loads(path.read_text())
 			self.assertFalse(record["valid"])
-			self.assertEqual(record["inference_time_scope"], "pytorch_cpu_forward_only")
+			self.assertEqual(record["inference_time_scope"], "image_preprocessing_through_output_publish")
 			self.assertIn("CUDA is not available", record["error_message"])
 			self.assertIn("2 image frame(s) failed", record["error_message"])
 			self.assertEqual(record["failed_frames"], 2)
@@ -218,8 +235,13 @@ class DatasetPipelineTests(unittest.TestCase):
 			self.assertTrue(_merge_profile("AirNet", args, profile))
 			record = json.loads(path.read_text())
 			self.assertTrue(record["valid"])
-			self.assertEqual(record["duration"], 200)
-			self.assertEqual(record["unit"], "CPU")
+			self.assertEqual(record["duration"], 123)
+			self.assertEqual(record["unit"], "Robot Hardware")
+			self.assertEqual(record["pytorch_duration"], 200)
+			self.assertEqual(record["pytorch_unit"], "CPU")
+			self.assertEqual(
+				record["pytorch_inference_time_scope"], "pytorch_cpu_forward_only"
+			)
 			self.assertIsNone(record["error_message"])
 
 

@@ -552,8 +552,8 @@ def _merge_profile(model_name, args, profile):
         "cpu_p95_duration", "cpu_std_dev",
         "cpu_runs", "cpu_error", "gpu_duration", "gpu_min_duration",
         "gpu_max_duration", "gpu_median_duration", "gpu_p95_duration", "gpu_std_dev",
-        "gpu_runs", "gpu_error", "duration",
-        "unit", "iterations", "warmup_runs", "torch_cpu_threads", "torch_gpu_name",
+        "gpu_runs", "gpu_error",
+        "iterations", "warmup_runs", "torch_cpu_threads", "torch_gpu_name",
         "cpu_finite", "gpu_finite", "cpu_gpu_match", "cpu_gpu_max_abs_error",
         "cpu_gpu_top1_match",
         "cpu_gpu_rtol", "cpu_gpu_atol", "pytorch_onnx_match",
@@ -572,9 +572,6 @@ def _merge_profile(model_name, args, profile):
     analytics["onnxruntime_providers"] = ort_providers
     analytics["onnxruntime_timestamp"] = ort_timestamp
     analytics["torch_version"] = profile["torch_version"]
-    record["inference_time_scope"] = (
-        "pytorch_cpu_forward_only" if profile["unit"] == "CPU" else "pytorch_cuda_forward_only"
-    )
     record["cpu_runs_ns"] = profile["cpu_runs_ns"]
     record["gpu_runs_ns"] = profile["gpu_runs_ns"]
     record["onnxruntime_consistency_providers"] = profile[
@@ -603,15 +600,19 @@ def _merge_profile(model_name, args, profile):
         if gpu_correct:
             valid_backends["GPU"] = profile["gpu_duration"]
         fastest_backend = min(valid_backends, key=valid_backends.get)
-        record["duration"] = valid_backends[fastest_backend]
-        record["unit"] = (
+        record["pytorch_duration"] = valid_backends[fastest_backend]
+        record["pytorch_unit"] = (
             "CPU" if fastest_backend == "CPU" else profile["torch_gpu_name"]
         )
-        record["inference_time_scope"] = (
+        record["pytorch_inference_time_scope"] = (
             "pytorch_cpu_forward_only"
             if fastest_backend == "CPU"
             else "pytorch_cuda_forward_only"
         )
+    else:
+        record["pytorch_duration"] = None
+        record["pytorch_unit"] = None
+        record["pytorch_inference_time_scope"] = None
 
     validation_errors = []
     if not cpu_correct and not profile["cpu_finite"]:
