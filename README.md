@@ -170,14 +170,15 @@ through publishing the model output, covering input transport/queueing and the
 full callback; it also records `callback_latency_ns` from callback entry through
 output publishing. When a message has no usable timestamp or the ROS clocks are
 inconsistent, the end-to-end metric falls back to callback timing, with counts
-of each source recorded. Synthetic runs record `emulator: true`, the requested
-camera rate, and board identity; a normal camera-topic run records
-`emulator: false`. These figures measure the host and ROS path under the
-configured synthetic stream, not camera optics, sensor acquisition, or the
-physical robot's environment.
+of each source recorded. The `emulator` field means Android emulator and is
+`false` for this ROS-hosted node. Synthetic runs separately record
+`synthetic_input: true` and the requested camera rate; physical camera runs
+record `synthetic_input: false`. These figures measure the host and ROS path
+under the configured synthetic stream, not camera optics, sensor acquisition,
+or the physical robot's environment.
 
 For real-robot runs, omit `--emulate-camera` and point `--input-topic` at the
-physical camera. The record schema stays the same with `emulator: false`; the
+physical camera. The record uses `synthetic_input: false`; the
 message-stamp-to-output metric then includes the camera driver and ROS delivery
 delays to the inference callback. Run navigation/control nodes as usual during
 the measurement when you want to capture their shared-system impact. Preserve

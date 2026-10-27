@@ -189,7 +189,8 @@ class InferenceNode(Node):
 			"architecture": platform.machine(),
 			"os_version": platform.platform(),
 			"valid": self.failed_frames == 0,
-			"emulator": self.synthetic_input,
+			"emulator": False,
+			"synthetic_input": self.synthetic_input,
 			"input_source": "synthetic_camera" if self.synthetic_input else "sensor_topic",
 			"camera_rate_hz": self.camera_rate_hz if self.synthetic_input else None,
 			"observed_input_rate_hz": (
