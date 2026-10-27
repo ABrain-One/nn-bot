@@ -123,6 +123,7 @@ class DatasetPipelineTests(unittest.TestCase):
 				"cpu_gpu_max_abs_error": 0.0, "cpu_gpu_top1_match": True,
 				"cpu_gpu_rtol": 1e-2, "cpu_gpu_atol": 2e-3,
 				"pytorch_onnx_match": True, "pytorch_onnx_max_abs_error": 0.0,
+				"gpu_onnx_match": True, "gpu_onnx_max_abs_error": 0.0,
 				"total_ram_kb": 100, "free_ram_kb": 40, "available_ram_kb": 50,
 				"cached_kb": 10, "in_dim_0": 1, "in_dim_1": 3,
 				"in_dim_2": 32, "in_dim_3": 32, "torch_version": "test-torch",
@@ -154,7 +155,16 @@ class DatasetPipelineTests(unittest.TestCase):
 			self.assertEqual(record["device_analytics"]["onnxruntime_timestamp"], "ort-time")
 			self.assertTrue(record["valid"])
 
-	def test_merge_profile_marks_missing_gpu_profile_invalid(self):
+			profile["cpu_finite"] = False
+			profile["pytorch_onnx_match"] = False
+			self.assertTrue(_merge_profile("AirNet", args, profile))
+			record = json.loads(path.read_text())
+			self.assertTrue(record["valid"])
+			self.assertEqual(record["duration"], 100)
+			self.assertEqual(record["unit"], "Test GPU")
+			self.assertEqual(record["inference_time_scope"], "pytorch_cuda_forward_only")
+
+	def test_merge_profile_accepts_correct_cpu_without_cuda(self):
 		with TemporaryDirectory() as directory:
 			args = SimpleNamespace(results_dir=Path(directory), dataset="cifar-10")
 			path = args.results_dir / "AirNet" / f"robot_cifar-10_{socket.gethostname()}.json"
@@ -182,6 +192,7 @@ class DatasetPipelineTests(unittest.TestCase):
 				"cpu_gpu_max_abs_error": None, "cpu_gpu_top1_match": None,
 				"cpu_gpu_rtol": 1e-2, "cpu_gpu_atol": 2e-3,
 				"pytorch_onnx_match": True, "pytorch_onnx_max_abs_error": 0.0,
+				"gpu_onnx_match": None, "gpu_onnx_max_abs_error": None,
 				"total_ram_kb": 100, "free_ram_kb": 40, "available_ram_kb": 50,
 				"cached_kb": 10, "in_dim_0": 1, "in_dim_1": 3,
 				"in_dim_2": 32, "in_dim_3": 32, "torch_version": "test-torch",
@@ -200,6 +211,16 @@ class DatasetPipelineTests(unittest.TestCase):
 			self.assertIn("CUDA is not available", record["error_message"])
 			self.assertIn("2 image frame(s) failed", record["error_message"])
 			self.assertEqual(record["failed_frames"], 2)
+
+			record["failed_frames"] = 0
+			record["valid"] = True
+			path.write_text(json.dumps(record))
+			self.assertTrue(_merge_profile("AirNet", args, profile))
+			record = json.loads(path.read_text())
+			self.assertTrue(record["valid"])
+			self.assertEqual(record["duration"], 200)
+			self.assertEqual(record["unit"], "CPU")
+			self.assertIsNone(record["error_message"])
 
 
 if __name__ == "__main__":

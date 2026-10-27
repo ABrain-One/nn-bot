@@ -380,6 +380,16 @@ def profile_model(
     )[0]
     onnx_max_abs_error = float(np.max(np.abs(cpu_output.numpy() - onnx_output)))
     pytorch_onnx_match = bool(np.allclose(cpu_output.numpy(), onnx_output, rtol=1e-3, atol=1e-4))
+    gpu_onnx_max_abs_error = (
+        float(np.max(np.abs(gpu_output.numpy() - onnx_output)))
+        if gpu_output is not None
+        else None
+    )
+    gpu_onnx_match = (
+        bool(np.allclose(gpu_output.numpy(), onnx_output, rtol=1e-3, atol=1e-4))
+        if gpu_output is not None
+        else None
+    )
 
     successful = {"CPU": cpu_stats["avg"]}
     if gpu_stats:
@@ -427,6 +437,8 @@ def profile_model(
         "cpu_gpu_atol": 2e-3,
         "pytorch_onnx_match": pytorch_onnx_match,
         "pytorch_onnx_max_abs_error": onnx_max_abs_error,
+        "gpu_onnx_match": gpu_onnx_match,
+        "gpu_onnx_max_abs_error": gpu_onnx_max_abs_error,
         "onnxruntime_consistency_providers": onnx_input.get_providers(),
         "torch_version": torch.__version__,
         "task": model_row.get("task", "img-classification"),
@@ -545,7 +557,8 @@ def _merge_profile(model_name, args, profile):
         "cpu_finite", "gpu_finite", "cpu_gpu_match", "cpu_gpu_max_abs_error",
         "cpu_gpu_top1_match",
         "cpu_gpu_rtol", "cpu_gpu_atol", "pytorch_onnx_match",
-        "pytorch_onnx_max_abs_error", "total_ram_kb", "free_ram_kb",
+        "pytorch_onnx_max_abs_error", "gpu_onnx_match", "gpu_onnx_max_abs_error",
+        "total_ram_kb", "free_ram_kb",
         "available_ram_kb", "cached_kb", "in_dim_0", "in_dim_1", "in_dim_2",
         "in_dim_3", "task", "metric", "training_accuracy", "checkpoint_repository",
         "checkpoint_epoch",
@@ -572,15 +585,45 @@ def _merge_profile(model_name, args, profile):
         "assessment": profile["gpu_preflight"],
     }
 
+    cpu_correct = (
+        profile["cpu_runs"] > 0
+        and profile["cpu_finite"]
+        and profile["pytorch_onnx_match"]
+    )
+    gpu_correct = (
+        profile["gpu_runs"] > 0
+        and profile["gpu_finite"] is True
+        and profile["gpu_onnx_match"] is True
+    )
+
+    if cpu_correct or gpu_correct:
+        valid_backends = {}
+        if cpu_correct:
+            valid_backends["CPU"] = profile["cpu_duration"]
+        if gpu_correct:
+            valid_backends["GPU"] = profile["gpu_duration"]
+        fastest_backend = min(valid_backends, key=valid_backends.get)
+        record["duration"] = valid_backends[fastest_backend]
+        record["unit"] = (
+            "CPU" if fastest_backend == "CPU" else profile["torch_gpu_name"]
+        )
+        record["inference_time_scope"] = (
+            "pytorch_cpu_forward_only"
+            if fastest_backend == "CPU"
+            else "pytorch_cuda_forward_only"
+        )
+
     validation_errors = []
-    if not profile["cpu_finite"]:
+    if not cpu_correct and not profile["cpu_finite"]:
         validation_errors.append("PyTorch CPU output contains non-finite values")
-    if profile["gpu_runs"] < 1:
+    elif not cpu_correct:
+        validation_errors.append("PyTorch CPU and ONNX outputs do not match")
+    if not gpu_correct and profile["gpu_runs"] < 1:
         validation_errors.append(profile["gpu_error"] or "PyTorch CUDA profiling did not run")
-    elif profile["gpu_finite"] is not True:
+    elif not gpu_correct and profile["gpu_finite"] is not True:
         validation_errors.append("PyTorch CUDA output contains non-finite values")
-    if not profile["pytorch_onnx_match"]:
-        validation_errors.append("PyTorch and ONNX outputs do not match")
+    elif not gpu_correct:
+        validation_errors.append("PyTorch CUDA and ONNX outputs do not match")
     if profile["cpu_gpu_match"] is False:
         validation_errors.append("PyTorch CPU and CUDA outputs do not match")
     if profile["cpu_gpu_top1_match"] is False:
@@ -589,9 +632,15 @@ def _merge_profile(model_name, args, profile):
         validation_errors.append(
             f'{record["failed_frames"]} image frame(s) failed during inference'
         )
-    record["valid"] = bool(record.get("valid") and not validation_errors)
+    record["valid"] = bool(
+        record.get("valid")
+        and (cpu_correct or gpu_correct)
+        and not record.get("failed_frames", 0)
+    )
     if not record["valid"]:
         record["error_message"] = "; ".join(validation_errors) or "Inference validation failed"
+    else:
+        record["error_message"] = None
 
     temporary_path = path.with_suffix(path.suffix + ".tmp")
     temporary_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")

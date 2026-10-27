@@ -262,9 +262,11 @@ ROS inference node for each model. It listens to the live image topic, warms up
 the model, measures the configured number of frames, and writes a record to
 `stats/<model>/robot_<dataset>_<hostname>.json` before advancing. Failed image
 frames are counted and make the record invalid. The pipeline record is also
-invalid unless the PyTorch CUDA profile completes and passes output checks.
+valid when at least one PyTorch backend completes and its output passes the
+ONNX consistency check; CUDA is optional when unavailable or unsupported.
 `duration` in a pipeline record is the selected PyTorch CPU or CUDA forward
-time; `inference_time_scope` identifies which timing it contains. The separate
+time among backends that pass validation; `inference_time_scope` identifies
+which timing it contains. The separate
 `onnxruntime_latency_ns` field retains the ROS node's ONNX `session.run()` timing.
 Dataset-specific filenames keep results for different datasets separate.
 Existing valid
