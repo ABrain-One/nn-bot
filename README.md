@@ -106,7 +106,8 @@ provider's `session.run()` latency. Use the NN-Dataset pipeline below for the
 PyTorch CPU/CUDA profile and output-consistency checks.
 The `input_shape` field retains the model's actual tensor layout; `in_dim_0`
 through `in_dim_3` use NN-Lite's batch, height, width, channels order so records
-can be merged with that schema.
+can be merged with that schema. `unit` identifies the host hardware, while
+`onnxruntime_provider` identifies the ONNX Runtime provider used for inference.
 
 ## Run NN-Dataset Models
 

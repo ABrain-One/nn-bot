@@ -203,7 +203,7 @@ class InferenceNode(Node):
 			"failed_frames": self.failed_frames,
 			"last_frame_error": self.last_frame_error,
 			"duration": int(round(float(np.mean(self.latencies_ns)))),
-			"unit": self.session.get_providers()[0],
+			"unit": device_type,
 			"runtime": "ONNX Runtime",
 			"onnxruntime_provider": self.session.get_providers()[0],
 			"model_format": "onnx",
