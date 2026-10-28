@@ -633,10 +633,15 @@ def _merge_profile(model_name, args, profile):
         validation_errors.append(
             f'{record["failed_frames"]} image frame(s) failed during inference'
         )
+    if record.get("clock_inconsistency_frames", 0):
+        validation_errors.append(
+            f'{record["clock_inconsistency_frames"]} image frame(s) had inconsistent ROS clocks'
+        )
     record["valid"] = bool(
         record.get("valid")
         and (cpu_correct or gpu_correct)
         and not record.get("failed_frames", 0)
+        and not record.get("clock_inconsistency_frames", 0)
     )
     if not record["valid"]:
         record["error_message"] = "; ".join(validation_errors) or "Inference validation failed"

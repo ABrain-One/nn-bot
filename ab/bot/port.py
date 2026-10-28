@@ -21,6 +21,7 @@ from std_msgs.msg import Float32MultiArray, MultiArrayDimension
 
 from ab.bot.runtime import (
 	device_name,
+	header_to_publish_latency_ns,
 	l2_normalize,
 	message_stamp_ns,
 	preprocess_image,
@@ -94,7 +95,8 @@ class InferenceNode(Node):
 		self.end_to_end_latencies_ns = []
 		self.callback_latencies_ns = []
 		self.end_to_end_timestamp_frames = 0
-		self.callback_timestamp_frames = 0
+		self.clock_inconsistency_frames = 0
+		self.clock_error_message = None
 		self.arrival_timestamps_ns = []
 		self.failed_frames = 0
 		self.last_frame_error = None
@@ -147,6 +149,15 @@ class InferenceNode(Node):
 			elapsed_ns = time.perf_counter_ns() - started
 			published_ros_ns = self.get_clock().now().nanoseconds
 			callback_elapsed_ns = time.perf_counter_ns() - callback_started_ns
+			try:
+				header_latency_ns = header_to_publish_latency_ns(
+					source_stamp_ns, arrival_ros_ns, published_ros_ns
+				)
+			except ValueError as error:
+				self.clock_inconsistency_frames += 1
+				self.clock_error_message = str(error)
+				self.get_logger().error(self.clock_error_message)
+				header_latency_ns = None
 
 			if self.completed_warmups < self.warmup_runs:
 				self.completed_warmups += 1
@@ -156,15 +167,9 @@ class InferenceNode(Node):
 				self.latencies_ns.append(elapsed_ns)
 				self.onnxruntime_latencies_ns.append(session_elapsed_ns)
 				self.callback_latencies_ns.append(callback_elapsed_ns)
-				if source_stamp_ns > 0 and published_ros_ns >= source_stamp_ns:
-					self.end_to_end_latencies_ns.append(published_ros_ns - source_stamp_ns)
+				if header_latency_ns is not None:
+					self.end_to_end_latencies_ns.append(header_latency_ns)
 					self.end_to_end_timestamp_frames += 1
-				elif published_ros_ns >= arrival_ros_ns:
-					self.end_to_end_latencies_ns.append(published_ros_ns - arrival_ros_ns)
-					self.callback_timestamp_frames += 1
-				else:
-					self.end_to_end_latencies_ns.append(callback_elapsed_ns)
-					self.callback_timestamp_frames += 1
 				if len(self.latencies_ns) == self.iterations and not self.record_saved:
 					self.save_record(list(model_tensor.shape), list(output.shape))
 					self.record_saved = True
@@ -188,7 +193,7 @@ class InferenceNode(Node):
 			"board": device_type,
 			"architecture": platform.machine(),
 			"os_version": platform.platform(),
-			"valid": self.failed_frames == 0,
+			"valid": self.failed_frames == 0 and self.clock_inconsistency_frames == 0,
 			"emulator": False,
 			"synthetic_input": self.synthetic_input,
 			"input_source": "synthetic_camera" if self.synthetic_input else "sensor_topic",
@@ -199,9 +204,11 @@ class InferenceNode(Node):
 				else None
 			),
 			"iterations": self.iterations,
-			"error_message": self.last_frame_error,
 			"failed_frames": self.failed_frames,
+			"clock_inconsistency_frames": self.clock_inconsistency_frames,
+			"clock_error_message": self.clock_error_message,
 			"last_frame_error": self.last_frame_error,
+			"error_message": self.last_frame_error or self.clock_error_message,
 			"duration": int(round(float(np.mean(self.latencies_ns)))),
 			"unit": device_type,
 			"runtime": "ONNX Runtime",
@@ -217,13 +224,15 @@ class InferenceNode(Node):
 			"output_shape": output_shape,
 			"latency_ns": timing_stats(self.latencies_ns),
 			"onnxruntime_latency_ns": timing_stats(self.onnxruntime_latencies_ns),
-			"end_to_end_latency_ns": timing_stats(self.end_to_end_latencies_ns),
-			"end_to_end_latency_scope": (
-				"image_header_stamp_to_output_publish_with_callback_fallback"
+			"end_to_end_latency_ns": (
+				timing_stats(self.end_to_end_latencies_ns)
+				if self.end_to_end_latencies_ns
+				else None
 			),
+			"end_to_end_latency_scope": "image_header_stamp_to_output_publish",
 			"end_to_end_header_timestamp_frames": self.end_to_end_timestamp_frames,
-			"end_to_end_callback_timestamp_frames": self.callback_timestamp_frames,
 			"callback_latency_ns": timing_stats(self.callback_latencies_ns),
+			"callback_latency_scope": "callback_entry_to_output_publish",
 			"in_dim_0": input_batch,
 			"in_dim_1": input_height,
 			"in_dim_2": input_width,

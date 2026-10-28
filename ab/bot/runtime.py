@@ -109,6 +109,18 @@ def message_stamp_ns(message):
     return int(stamp.sec) * 1_000_000_000 + int(stamp.nanosec)
 
 
+def header_to_publish_latency_ns(source_stamp_ns, callback_ros_ns, published_ros_ns):
+    """Return header-stamp-to-publish latency, rejecting timestamps from inconsistent clocks."""
+    if source_stamp_ns <= 0:
+        return None
+    if source_stamp_ns > callback_ros_ns or source_stamp_ns > published_ros_ns:
+        raise ValueError(
+            "Image header timestamp is later than callback or publish ROS time; "
+            "clock domains may be inconsistent"
+        )
+    return published_ros_ns - source_stamp_ns
+
+
 def sample_system(interval=0.1):
     """Capture host memory and CPU utilization outside timed inference calls."""
     try:

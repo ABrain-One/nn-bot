@@ -166,17 +166,18 @@ python -m ab.bot.dataset_pipeline --model AirNet \
 	--camera-rate-hz 30
 ```
 
-The inference node records `end_to_end_latency_ns` from the image header stamp
-through publishing the model output, covering input transport/queueing and the
-full callback; it also records `callback_latency_ns` from callback entry through
-output publishing. When a message has no usable timestamp or the ROS clocks are
-inconsistent, the end-to-end metric falls back to callback timing, with counts
-of each source recorded. The `emulator` field means Android emulator and is
-`false` for this ROS-hosted node. Synthetic runs separately record
-`synthetic_input: true` and the requested camera rate; physical camera runs
-record `synthetic_input: false`. These figures measure the host and ROS path
-under the configured synthetic stream, not camera optics, sensor acquisition,
-or the physical robot's environment.
+The inference node records separate `end_to_end_latency_ns` (image header stamp
+to output publish) and `callback_latency_ns` (callback entry to output publish)
+metrics; their samples are never combined. Frames without a usable header stamp
+are omitted from `end_to_end_latency_ns`. If a header timestamp is later than
+the ROS callback-entry or publish time, the frame is counted in
+`clock_inconsistency_frames`, excluded from the header-based metric, and makes
+the run invalid rather than substituting callback timing. The `emulator` field
+means Android emulator and is `false` for this ROS-hosted node. Synthetic runs
+separately record `synthetic_input: true` and the requested camera rate;
+physical camera runs record `synthetic_input: false`. These figures measure
+the host and ROS path under the configured synthetic stream, not camera optics,
+sensor acquisition, or the physical robot's environment.
 
 For real-robot runs, omit `--emulate-camera` and point `--input-topic` at the
 physical camera. The record uses `synthetic_input: false`; the

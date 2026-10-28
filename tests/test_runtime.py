@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from ab.bot.runtime import (
     device_name,
+    header_to_publish_latency_ns,
     l2_normalize,
     message_stamp_ns,
     preprocess_image,
@@ -104,6 +105,18 @@ class RuntimeTests(unittest.TestCase):
         )
 
         self.assertEqual(message_stamp_ns(message), 12_000_000_034)
+
+    def test_header_latency_uses_only_consistent_ros_timestamps(self):
+        self.assertEqual(header_to_publish_latency_ns(100, 110, 150), 50)
+
+    def test_header_latency_is_missing_when_message_stamp_is_unset(self):
+        self.assertIsNone(header_to_publish_latency_ns(0, 110, 150))
+
+    def test_header_latency_rejects_timestamp_after_callback_or_publish(self):
+        with self.assertRaisesRegex(ValueError, "clock domains may be inconsistent"):
+            header_to_publish_latency_ns(120, 110, 150)
+        with self.assertRaisesRegex(ValueError, "clock domains may be inconsistent"):
+            header_to_publish_latency_ns(160, 150, 155)
 
 
 if __name__ == "__main__":

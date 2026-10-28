@@ -190,6 +190,7 @@ class DatasetPipelineTests(unittest.TestCase):
 				"unit": "Robot Hardware",
 				"inference_time_scope": "image_preprocessing_through_output_publish",
 				"failed_frames": 2,
+				"clock_inconsistency_frames": 0,
 				"last_frame_error": "RuntimeError: dropped frame",
 				"latency_ns": {"avg": 123.0},
 				"device_analytics": {"providers": ["CPUExecutionProvider"]},
@@ -224,12 +225,24 @@ class DatasetPipelineTests(unittest.TestCase):
 			self.assertFalse(_merge_profile("AirNet", args, profile))
 			record = json.loads(path.read_text())
 			self.assertFalse(record["valid"])
-			self.assertEqual(record["inference_time_scope"], "image_preprocessing_through_output_publish")
+			self.assertEqual(
+				record["inference_time_scope"],
+				"image_preprocessing_through_output_publish",
+			)
 			self.assertIn("CUDA is not available", record["error_message"])
 			self.assertIn("2 image frame(s) failed", record["error_message"])
 			self.assertEqual(record["failed_frames"], 2)
 
 			record["failed_frames"] = 0
+			record["valid"] = True
+			record["clock_inconsistency_frames"] = 1
+			path.write_text(json.dumps(record))
+			self.assertFalse(_merge_profile("AirNet", args, profile))
+			record = json.loads(path.read_text())
+			self.assertFalse(record["valid"])
+			self.assertIn("1 image frame(s) had inconsistent ROS clocks", record["error_message"])
+
+			record["clock_inconsistency_frames"] = 0
 			record["valid"] = True
 			path.write_text(json.dumps(record))
 			self.assertTrue(_merge_profile("AirNet", args, profile))
