@@ -121,6 +121,17 @@ def header_to_publish_latency_ns(source_stamp_ns, callback_ros_ns, published_ros
     return published_ros_ns - source_stamp_ns
 
 
+def dropped_frames_between(previous_stamp_ns, current_stamp_ns, frame_rate_hz):
+    """Estimate missing camera frames from the elapsed time between source image stamps."""
+    if current_stamp_ns <= previous_stamp_ns:
+        raise ValueError("Image header timestamps are not increasing")
+    frame_period_ns = 1_000_000_000 / frame_rate_hz
+    expected_intervals = max(
+        1, int(round((current_stamp_ns - previous_stamp_ns) / frame_period_ns))
+    )
+    return expected_intervals - 1
+
+
 def sample_system(interval=0.1):
     """Capture host memory and CPU utilization outside timed inference calls."""
     try:

@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from ab.bot.runtime import (
     device_name,
+    dropped_frames_between,
     header_to_publish_latency_ns,
     l2_normalize,
     message_stamp_ns,
@@ -117,6 +118,22 @@ class RuntimeTests(unittest.TestCase):
             header_to_publish_latency_ns(120, 110, 150)
         with self.assertRaisesRegex(ValueError, "clock domains may be inconsistent"):
             header_to_publish_latency_ns(160, 150, 155)
+
+    def test_dropped_frames_counts_gaps_at_configured_rate(self):
+        period_ns = round(1_000_000_000 / 30)
+
+        self.assertEqual(
+            dropped_frames_between(1_000_000_000, 1_000_000_000 + period_ns, 30),
+            0,
+        )
+        self.assertEqual(
+            dropped_frames_between(1_000_000_000, 1_000_000_000 + 3 * period_ns, 30),
+            2,
+        )
+
+    def test_dropped_frames_rejects_non_increasing_timestamps(self):
+        with self.assertRaisesRegex(ValueError, "not increasing"):
+            dropped_frames_between(100, 100, 30)
 
 
 if __name__ == "__main__":

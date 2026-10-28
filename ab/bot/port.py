@@ -16,11 +16,13 @@ from cv_bridge import CvBridge
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.executors import SingleThreadedExecutor
+from rclpy.qos import SensorDataQoS
 from sensor_msgs.msg import Image
 from std_msgs.msg import Float32MultiArray, MultiArrayDimension
 
 from ab.bot.runtime import (
 	device_name,
+	dropped_frames_between,
 	header_to_publish_latency_ns,
 	l2_normalize,
 	message_stamp_ns,
@@ -97,6 +99,8 @@ class InferenceNode(Node):
 		self.end_to_end_timestamp_frames = 0
 		self.clock_inconsistency_frames = 0
 		self.clock_error_message = None
+		self.previous_synthetic_stamp_ns = None
+		self.dropped_frames = 0
 		self.arrival_timestamps_ns = []
 		self.failed_frames = 0
 		self.last_frame_error = None
@@ -109,7 +113,7 @@ class InferenceNode(Node):
 			Image,
 			str(self.get_parameter("input_topic").value),
 			self.on_image,
-			10,
+			SensorDataQoS(),
 		)
 		self.get_logger().info(
 			f"Loaded {model_path.name}; providers: {', '.join(active_providers)}"
@@ -153,6 +157,14 @@ class InferenceNode(Node):
 				header_latency_ns = header_to_publish_latency_ns(
 					source_stamp_ns, arrival_ros_ns, published_ros_ns
 				)
+				if self.synthetic_input and source_stamp_ns > 0:
+					if self.previous_synthetic_stamp_ns is not None:
+						self.dropped_frames += dropped_frames_between(
+							self.previous_synthetic_stamp_ns,
+							source_stamp_ns,
+							self.camera_rate_hz,
+						)
+					self.previous_synthetic_stamp_ns = source_stamp_ns
 			except ValueError as error:
 				self.clock_inconsistency_frames += 1
 				self.clock_error_message = str(error)
@@ -207,6 +219,7 @@ class InferenceNode(Node):
 			"failed_frames": self.failed_frames,
 			"clock_inconsistency_frames": self.clock_inconsistency_frames,
 			"clock_error_message": self.clock_error_message,
+			"dropped_frames": self.dropped_frames if self.synthetic_input else None,
 			"last_frame_error": self.last_frame_error,
 			"error_message": self.last_frame_error or self.clock_error_message,
 			"duration": int(round(float(np.mean(self.latencies_ns)))),

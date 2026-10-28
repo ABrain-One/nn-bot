@@ -179,6 +179,11 @@ physical camera runs record `synthetic_input: false`. These figures measure
 the host and ROS path under the configured synthetic stream, not camera optics,
 sensor acquisition, or the physical robot's environment.
 
+The synthetic publisher generates a new frame each tick and uses
+`SensorDataQoS` (best-effort). Its `dropped_frames` count estimates missed
+synthetic camera frames from gaps between received source timestamps; it is
+`null` for physical-camera runs, where the source frame rate is not configured.
+
 For real-robot runs, omit `--emulate-camera` and point `--input-topic` at the
 physical camera. The record uses `synthetic_input: false`; the
 message-stamp-to-output metric then includes the camera driver and ROS delivery
