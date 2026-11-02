@@ -677,6 +677,8 @@ def _run_model(model_path, model_name, args):
         "camera_rate_hz": args.camera_rate_hz if args.emulate_camera else 0.0,
         "warmup_runs": args.warmup_runs,
         "iterations": args.iterations,
+        "startup_drop_frames": args.startup_drop_frames,
+        "ready_topic": args.ready_topic,
         "input_scale": args.input_scale,
         "input_mean": mean,
         "input_std": std,
@@ -691,18 +693,56 @@ def _run_model(model_path, model_name, args):
         command.extend(["-p", f"{key}:={value}"])
 
     print(f"[RUN] {model_name}: {' '.join(command)}", flush=True)
+    inference_process = None
     camera_publisher = None
+    result_returncode = None
     try:
+        # Start inference first. port.py loads the ONNX session, creates its
+        # subscription, then publishes a transient-local ready signal.
+        inference_process = subprocess.Popen(command)
         if args.emulate_camera:
+            ready_command = [
+                "ros2", "topic", "echo", "--once", args.ready_topic,
+                "std_msgs/msg/Bool", "--qos-durability", "transient_local",
+            ]
+            print(
+                f"[WAIT] Waiting for inference readiness on {args.ready_topic}",
+                flush=True,
+            )
+            try:
+                ready_result = subprocess.run(
+                    ready_command,
+                    capture_output=True,
+                    text=True,
+                    timeout=min(30.0, args.model_timeout),
+                    check=False,
+                )
+            except subprocess.TimeoutExpired as error:
+                raise RuntimeError(
+                    f"Inference node did not become ready within the readiness timeout "
+                    f"on {args.ready_topic}"
+                ) from error
+            if ready_result.returncode != 0 or "data: true" not in ready_result.stdout.lower():
+                detail = (ready_result.stderr or ready_result.stdout).strip()
+                raise RuntimeError(
+                    f"Could not confirm inference readiness on {args.ready_topic}: "
+                    f"{detail or 'no true readiness message received'}"
+                )
+            if inference_process.poll() is not None:
+                raise RuntimeError(
+                    f"Inference process exited before camera startup "
+                    f"(status {inference_process.returncode})"
+                )
             camera_command = _camera_emulator_command(args)
-            print(f"[CAMERA] {' '.join(camera_command)}", flush=True)
+            print(f"[CAMERA] Starting after inference is ready: {' '.join(camera_command)}", flush=True)
             camera_publisher = subprocess.Popen(camera_command)
-        result = subprocess.run(command, timeout=args.model_timeout, check=False)
-    except subprocess.TimeoutExpired:
-        print(f"[FAIL] {model_name}: benchmark exceeded {args.model_timeout}s")
-        return False
-    except OSError as error:
-        print(f"[FAIL] {model_name}: could not start ROS process: {error}")
+
+        try:
+            result_returncode = inference_process.wait(timeout=args.model_timeout)
+        except subprocess.TimeoutExpired:
+            raise RuntimeError(f"benchmark exceeded {args.model_timeout}s")
+    except (OSError, RuntimeError) as error:
+        print(f"[FAIL] {model_name}: {error}")
         return False
     finally:
         if camera_publisher is not None:
@@ -712,15 +752,22 @@ def _run_model(model_path, model_name, args):
             except subprocess.TimeoutExpired:
                 camera_publisher.kill()
                 camera_publisher.wait()
-    if result.returncode != 0 or not report_path.exists():
-        print(f"[FAIL] {model_name}: ROS node exited with status {result.returncode}")
+        if inference_process is not None and inference_process.poll() is None:
+            inference_process.send_signal(signal.SIGINT)
+            try:
+                inference_process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                inference_process.kill()
+                inference_process.wait()
+    if result_returncode != 0 or not report_path.exists():
+        print(f"[FAIL] {model_name}: ROS node exited with status {result_returncode}")
         return False
     return True
 
 
 def parser():
     ap = argparse.ArgumentParser(
-        description="Export NN-Dataset image classifiers and benchmark them with a ROS 2 image stream."
+        description="Export and benchmark NN-Dataset image classifiers on a ROS 2 robot."
     )
     selection = ap.add_mutually_exclusive_group(required=True)
     selection.add_argument("--model", help="One NN-Dataset architecture name, e.g. AirNet")
@@ -729,6 +776,11 @@ def parser():
     ap.add_argument("--limit", type=int, help="Limit an --all-models run (useful for a short trial)")
     ap.add_argument("--input-topic", default="/camera/image_raw")
     ap.add_argument("--output-topic", default="/nn_bot/output")
+    ap.add_argument(
+        "--ready-topic",
+        default="/nn_bot/ready",
+        help="Transient-local Bool topic used to signal that inference is initialized",
+    )
     ap.add_argument(
         "--emulate-camera",
         action="store_true",
@@ -748,6 +800,12 @@ def parser():
     ap.add_argument("--export-only", action="store_true", help="Export ONNX files without starting ROS inference")
     ap.add_argument("--warmup-runs", type=int, default=10)
     ap.add_argument("--iterations", type=int, default=20)
+    ap.add_argument(
+        "--startup-drop-frames",
+        type=int,
+        default=10,
+        help="Discard initial image frames before warm-up and latency measurement",
+    )
     ap.add_argument("--input-scale", type=float, default=1.0 / 255.0)
     ap.add_argument("--input-mean", type=float, nargs="+")
     ap.add_argument("--input-std", type=float, nargs="+")
@@ -763,6 +821,8 @@ def main(args=None):
         ap.error("--limit must be at least 1")
     if args.iterations < 1 or args.warmup_runs < 0 or args.model_timeout <= 0:
         ap.error("iterations and model-timeout must be positive; warmup-runs cannot be negative")
+    if args.startup_drop_frames < 0:
+        ap.error("--startup-drop-frames cannot be negative")
     if not math.isfinite(args.camera_rate_hz) or args.camera_rate_hz <= 0:
         ap.error("--camera-rate-hz must be finite and positive")
     if (
