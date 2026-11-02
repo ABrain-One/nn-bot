@@ -21,7 +21,15 @@ from pathlib import Path
 
 import numpy as np
 
-from ab.bot.runtime import sample_gpus, sample_system, timing_stats
+from ab.bot.runtime import (
+    get_cpu_affinity,
+    sample_cpu_frequencies,
+    sample_gpus,
+    sample_system,
+    sample_temperatures,
+    set_cpu_affinity,
+    timing_stats,
+)
 
 
 CHECKPOINT_REPOSITORY = "NN-Dataset/checkpoints-epoch-50"
@@ -258,16 +266,21 @@ def profile_model(
     model_row,
     onnx_path,
     hf_hub_download,
-    iterations=20,
+    iterations=500,
     warmup_runs=10,
     input_tensor=None,
     gpu_utilization_limit=20.0,
     gpu_memory_limit_percent=20.0,
     gpu_busy_policy="warn",
+    cpu_affinity=None,
+    onnx_num_threads=1,
 ):
     """Profile one transformed NN-Dataset sample on PyTorch CPU and CUDA."""
     import torch
     import onnxruntime as ort
+
+    if cpu_affinity is not None and cpu_affinity >= 0:
+        set_cpu_affinity(cpu_affinity)
 
     cpu_device = torch.device("cpu")
     torch, cpu_model, input_shape = _load_torch_model(model_row, hf_hub_download, cpu_device)
@@ -373,7 +386,13 @@ def profile_model(
         raise RuntimeError(
             f"ONNX Runtime CPU provider is unavailable: {ort.get_available_providers()}"
         )
-    onnx_input = ort.InferenceSession(str(onnx_path), providers=["CPUExecutionProvider"])
+    session_options = ort.SessionOptions()
+    if onnx_num_threads > 0:
+        session_options.intra_op_num_threads = onnx_num_threads
+        session_options.inter_op_num_threads = 1
+    onnx_input = ort.InferenceSession(
+        str(onnx_path), sess_options=session_options, providers=["CPUExecutionProvider"]
+    )
     onnx_output = onnx_input.run(
         None,
         {onnx_input.get_inputs()[0].name: cpu_input.detach().cpu().numpy()},
@@ -409,6 +428,7 @@ def profile_model(
         "cpu_max_duration": int(round(cpu_stats["max"])),
         "cpu_median_duration": int(round(cpu_stats["median"])),
         "cpu_p95_duration": int(round(cpu_stats["p95"])),
+        "cpu_p99_duration": int(round(cpu_stats["p99"])),
         "cpu_std_dev": cpu_stats["std"],
         "cpu_runs": len(cpu_runs),
         "cpu_error": None,
@@ -417,9 +437,16 @@ def profile_model(
         "gpu_max_duration": int(round(gpu_stats["max"])) if gpu_stats else None,
         "gpu_median_duration": int(round(gpu_stats["median"])) if gpu_stats else None,
         "gpu_p95_duration": int(round(gpu_stats["p95"])) if gpu_stats else None,
+        "gpu_p99_duration": int(round(gpu_stats["p99"])) if gpu_stats else None,
         "gpu_std_dev": gpu_stats["std"] if gpu_stats else None,
         "gpu_runs": len(gpu_runs),
         "gpu_error": gpu_error,
+        "npu_duration": None,
+        "npu_min_duration": None,
+        "npu_max_duration": None,
+        "npu_std_dev": None,
+        "npu_runs": 0,
+        "npu_error": None,
         "cpu_runs_ns": cpu_runs,
         "gpu_runs_ns": gpu_runs,
         "duration": int(round(successful[fastest])),
@@ -458,8 +485,12 @@ def profile_model(
             "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
             "cpu_info": {
                 "cpu_cores": os.cpu_count(),
+                "cpu_affinity": get_cpu_affinity(),
+                "cpu_frequencies": sample_cpu_frequencies(),
+                "temperatures": sample_temperatures(),
                 "processors": [{"vendor_id": platform.processor(), "model": platform.machine()}],
                 "torch_threads": torch.get_num_threads(),
+                "onnx_num_threads": onnx_num_threads if onnx_num_threads > 0 else None,
                 "util_percent_snapshot_mean": float(statistics.mean(cpu_util)) if cpu_util else None,
             },
             "gpu_info": {
@@ -542,17 +573,18 @@ def _merge_profile(model_name, args, profile):
     ort_providers = analytics.get("providers")
     ort_timestamp = analytics.get("timestamp")
     ort_provider = ort_providers[0] if ort_providers else record.get("onnxruntime_provider")
-    record["onnxruntime_latency_ns"] = record.get(
-        "onnxruntime_latency_ns", record.get("latency_ns")
-    )
+    record.pop("onnxruntime_latency_ns", None)
+    record.pop("onnxruntime_latency_scope", None)
     record["onnxruntime_provider"] = ort_provider
     record["runtime"] = "PyTorch and ONNX Runtime"
     for field in (
         "cpu_duration", "cpu_min_duration", "cpu_max_duration", "cpu_median_duration",
-        "cpu_p95_duration", "cpu_std_dev",
+        "cpu_p95_duration", "cpu_p99_duration", "cpu_std_dev",
         "cpu_runs", "cpu_error", "gpu_duration", "gpu_min_duration",
-        "gpu_max_duration", "gpu_median_duration", "gpu_p95_duration", "gpu_std_dev",
-        "gpu_runs", "gpu_error",
+        "gpu_max_duration", "gpu_median_duration", "gpu_p95_duration", "gpu_p99_duration",
+        "gpu_std_dev", "gpu_runs", "gpu_error",
+        "npu_duration", "npu_min_duration", "npu_max_duration", "npu_std_dev",
+        "npu_runs", "npu_error",
         "iterations", "warmup_runs", "torch_cpu_threads", "torch_gpu_name",
         "cpu_finite", "gpu_finite", "cpu_gpu_match", "cpu_gpu_max_abs_error",
         "cpu_gpu_top1_match",
@@ -682,6 +714,9 @@ def _run_model(model_path, model_name, args):
         "input_scale": args.input_scale,
         "input_mean": mean,
         "input_std": std,
+        "deadline_ms": args.deadline_ms,
+        "cpu_affinity": args.cpu_affinity if args.cpu_affinity is not None else -1,
+        "onnx_num_threads": args.onnx_num_threads,
         "exit_after_benchmark": True,
     }
     command = _inference_command()
@@ -799,7 +834,25 @@ def parser():
     ap.add_argument("--results-dir", type=Path, default=Path("stats"))
     ap.add_argument("--export-only", action="store_true", help="Export ONNX files without starting ROS inference")
     ap.add_argument("--warmup-runs", type=int, default=10)
-    ap.add_argument("--iterations", type=int, default=20)
+    ap.add_argument("--iterations", type=int, default=500)
+    ap.add_argument(
+        "--deadline-ms",
+        type=float,
+        default=33.0,
+        help="Latency deadline in milliseconds (e.g. 33 ms at 30 Hz)",
+    )
+    ap.add_argument(
+        "--cpu-affinity",
+        type=int,
+        default=None,
+        help="Pin benchmark processes to a specific CPU core",
+    )
+    ap.add_argument(
+        "--onnx-num-threads",
+        type=int,
+        default=1,
+        help="Number of intra-op threads for ONNX Runtime sessions (default: 1)",
+    )
     ap.add_argument(
         "--startup-drop-frames",
         type=int,
@@ -871,6 +924,8 @@ def main(args=None):
                 gpu_utilization_limit=args.gpu_utilization_limit,
                 gpu_memory_limit_percent=args.gpu_memory_limit_percent,
                 gpu_busy_policy=args.gpu_busy_policy,
+                cpu_affinity=args.cpu_affinity,
+                onnx_num_threads=args.onnx_num_threads,
             )
             for warning in profile["gpu_preflight"]["warnings"]:
                 print(f"[WARN] {name}: {warning}", flush=True)

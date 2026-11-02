@@ -1,7 +1,7 @@
 """Model-input preparation and benchmark statistics independent of ROS 2."""
 
+import os
 import shutil
-import statistics
 import subprocess
 import platform
 from pathlib import Path
@@ -70,20 +70,29 @@ def l2_normalize(output):
     return output / norm
 
 
-def timing_stats(samples_ns):
-    """Return distribution statistics and all measured nanosecond samples."""
+def timing_stats(samples_ns, deadline_ns=None):
+    """Return distribution statistics and all measured nanosecond samples.
+
+    Standard deviation is computed as the population standard deviation
+    (dividing by N, ddof=0), matching nn-lite's convention (unlike sample
+    standard deviation with Bessel's correction N-1).
+    """
     samples = np.asarray(samples_ns, dtype=np.float64)
     if samples.size == 0:
         raise ValueError("At least one timing sample is required")
-    return {
+    stats = {
         "avg": float(np.mean(samples)),
         "median": float(np.median(samples)),
         "p95": float(np.percentile(samples, 95)),
+        "p99": float(np.percentile(samples, 99)),
         "min": float(np.min(samples)),
         "max": float(np.max(samples)),
-        "std": float(statistics.stdev(samples)) if samples.size > 1 else 0.0,
+        "std": float(np.std(samples)),
         "samples": samples.tolist(),
     }
+    if deadline_ns is not None:
+        stats["deadline_misses"] = int(np.sum(samples > deadline_ns))
+    return stats
 
 
 def synthetic_rgb_frame(width, height, frame_index=0):
@@ -132,8 +141,78 @@ def dropped_frames_between(previous_stamp_ns, current_stamp_ns, frame_rate_hz):
     return expected_intervals - 1
 
 
+def sample_temperatures():
+    """Capture CPU, GPU, and system temperatures in Celsius when available."""
+    temps = {}
+    try:
+        import psutil
+
+        if hasattr(psutil, "sensors_temperatures"):
+            sensor_data = psutil.sensors_temperatures()
+            if sensor_data:
+                for name, entries in sensor_data.items():
+                    temps[name] = [
+                        {
+                            "label": e.label or name,
+                            "current_c": e.current,
+                            "high_c": e.high,
+                            "critical_c": e.critical,
+                        }
+                        for e in entries
+                    ]
+    except Exception:
+        pass
+    return temps or None
+
+
+def sample_cpu_frequencies():
+    """Capture CPU clock frequencies and scaling governors when available on Linux."""
+    info = {}
+    try:
+        import psutil
+
+        freq = psutil.cpu_freq()
+        if freq:
+            info["cur_freq_mhz"] = freq.current
+            info["min_freq_mhz"] = freq.min
+            info["max_freq_mhz"] = freq.max
+    except Exception:
+        pass
+
+    try:
+        governor_path = Path("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor")
+        if governor_path.is_file():
+            info["scaling_governor"] = governor_path.read_text().strip()
+    except OSError:
+        pass
+    return info or None
+
+
+def set_cpu_affinity(cpus):
+    """Pin the current process to the given CPU core(s)."""
+    if hasattr(os, "sched_setaffinity"):
+        try:
+            if isinstance(cpus, int):
+                cpus = [cpus]
+            os.sched_setaffinity(0, set(cpus))
+            return True
+        except (OSError, ValueError):
+            return False
+    return False
+
+
+def get_cpu_affinity():
+    """Return the CPU affinity mask of the current process."""
+    if hasattr(os, "sched_getaffinity"):
+        try:
+            return sorted(os.sched_getaffinity(0))
+        except OSError:
+            return None
+    return None
+
+
 def sample_system(interval=0.1):
-    """Capture host memory and CPU utilization outside timed inference calls."""
+    """Capture host memory, CPU utilization, frequencies and temperatures."""
     try:
         import psutil
     except ImportError:
@@ -157,6 +236,8 @@ def sample_system(interval=0.1):
         "cpu_percent": psutil.cpu_percent(interval=interval),
         "process_cpu_percent": process_cpu,
         "process_rss_bytes": process_rss,
+        "cpu_frequencies": sample_cpu_frequencies(),
+        "temperatures": sample_temperatures(),
     }
 
 
@@ -174,13 +255,13 @@ def device_name():
 
 
 def sample_gpus():
-    """Capture NVIDIA GPU name, memory use and utilization when nvidia-smi exists."""
+    """Capture NVIDIA GPU name, memory use, utilization and temperature when nvidia-smi exists."""
     executable = shutil.which("nvidia-smi")
     if executable is None:
         return None
     query = (
         "--query-gpu=index,name,driver_version,memory.total,memory.used,"
-        "memory.free,utilization.gpu --format=csv,noheader,nounits"
+        "memory.free,utilization.gpu,temperature.gpu --format=csv,noheader,nounits"
     )
     try:
         result = subprocess.run(
@@ -209,6 +290,7 @@ def sample_gpus():
                     "memory_used_mb": parse_number(fields[4]),
                     "memory_free_mb": parse_number(fields[5]),
                     "util_percent": parse_number(fields[6]),
+                    "temperature_c": parse_number(fields[7]) if len(fields) > 7 else None,
                 }
             )
         except ValueError:

@@ -4,7 +4,7 @@ import math
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import SensorDataQoS
+from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
 
 from ab.bot.runtime import synthetic_rgb_frame
@@ -28,7 +28,7 @@ class SyntheticCameraNode(Node):
             raise ValueError(f"Frame dimensions must be positive, got {self.width}x{self.height}")
         self.frame_index = 0
         self.publisher = self.create_publisher(
-            Image, self.image_topic, SensorDataQoS()
+            Image, self.image_topic, qos_profile_sensor_data
         )
         self.timer = self.create_timer(1.0 / self.publish_rate_hz, self.publish_frame)
         self.get_logger().info(

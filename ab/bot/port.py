@@ -15,7 +15,7 @@ import rclpy
 from cv_bridge import CvBridge
 from rclpy.node import Node
 from rclpy.parameter import Parameter
-from rclpy.executors import SingleThreadedExecutor
+from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image
 from std_msgs.msg import Bool, Float32MultiArray, MultiArrayDimension
@@ -23,10 +23,14 @@ from std_msgs.msg import Bool, Float32MultiArray, MultiArrayDimension
 from ab.bot.runtime import (
     device_name,
     dropped_frames_between,
+    get_cpu_affinity,
     header_to_publish_latency_ns,
     l2_normalize,
     message_stamp_ns,
     preprocess_image,
+    sample_cpu_frequencies,
+    sample_temperatures,
+    set_cpu_affinity,
     timing_stats,
 )
 
@@ -42,7 +46,10 @@ class InferenceNode(Node):
         self.declare_parameter("synthetic_input", False)
         self.declare_parameter("camera_rate_hz", 0.0)
         self.declare_parameter("warmup_runs", 10)
-        self.declare_parameter("iterations", 20)
+        self.declare_parameter("iterations", 500)
+        self.declare_parameter("deadline_ms", 33.0)
+        self.declare_parameter("cpu_affinity", -1)
+        self.declare_parameter("onnx_num_threads", 0)
         self.declare_parameter("startup_drop_frames", 10)
         self.declare_parameter("ready_topic", "/nn_bot/ready")
         self.declare_parameter("input_scale", 1.0 / 255.0)
@@ -52,6 +59,15 @@ class InferenceNode(Node):
             "providers", ["CUDAExecutionProvider", "CPUExecutionProvider"]
         )
         self.declare_parameter("exit_after_benchmark", False)
+
+        cpu_affinity = int(self.get_parameter("cpu_affinity").value)
+        if cpu_affinity >= 0:
+            if set_cpu_affinity(cpu_affinity):
+                self.get_logger().info(f"Pinned process to CPU core {cpu_affinity}")
+            else:
+                self.get_logger().warning(
+                    f"Could not pin process to CPU core {cpu_affinity}"
+                )
 
         model_path = Path(self.get_parameter("model_path").value).expanduser()
         if not model_path.is_file():
@@ -74,7 +90,14 @@ class InferenceNode(Node):
 
         if "CUDAExecutionProvider" in providers and hasattr(ort, "preload_dlls"):
             ort.preload_dlls()
-        self.session = ort.InferenceSession(str(model_path), providers=providers)
+        session_options = ort.SessionOptions()
+        onnx_num_threads = int(self.get_parameter("onnx_num_threads").value)
+        if onnx_num_threads > 0:
+            session_options.intra_op_num_threads = onnx_num_threads
+            session_options.inter_op_num_threads = 1
+        self.session = ort.InferenceSession(
+            str(model_path), sess_options=session_options, providers=providers
+        )
         active_providers = self.session.get_providers()
         if "CUDAExecutionProvider" in providers and "CUDAExecutionProvider" not in active_providers:
             self.get_logger().warning(
@@ -100,7 +123,6 @@ class InferenceNode(Node):
         self.startup_frames_dropped = 0
         self.ready = False
         self.latencies_ns = []
-        self.onnxruntime_latencies_ns = []
         self.end_to_end_latencies_ns = []
         self.callback_latencies_ns = []
         self.end_to_end_timestamp_frames = 0
@@ -145,6 +167,7 @@ class InferenceNode(Node):
         ready_message.data = True
         self.ready_publisher.publish(ready_message)
         self.ready = True
+        self.ready_timer = self.create_timer(0.1, self.publish_readiness)
         self.get_logger().info(
             f"Loaded {model_path.name}; providers: {', '.join(active_providers)}"
         )
@@ -152,6 +175,17 @@ class InferenceNode(Node):
             f"[NN_BOT_READY] model/session initialized; subscribed to "
             f"{self.get_parameter('input_topic').value}"
         )
+
+    def publish_readiness(self):
+        if not self.ready:
+            return
+        ready_message = Bool()
+        ready_message.data = True
+        self.ready_publisher.publish(ready_message)
+        if len(self.latencies_ns) > 0 or self.startup_frames_dropped > 0:
+            if self.ready_timer is not None:
+                self.ready_timer.cancel()
+                self.ready_timer = None
 
     def on_image(self, message):
         # Discard initial frames after model readiness, before any timing or
@@ -176,9 +210,7 @@ class InferenceNode(Node):
                 self.input_mean,
                 self.input_std,
             )
-            session_started = time.perf_counter_ns()
             outputs = self.session.run(None, {self.model_input.name: model_tensor})
-            session_elapsed_ns = time.perf_counter_ns() - session_started
             output = l2_normalize(outputs[0])
 
             message_out = Float32MultiArray()
@@ -219,7 +251,6 @@ class InferenceNode(Node):
 
             if len(self.latencies_ns) < self.iterations:
                 self.latencies_ns.append(elapsed_ns)
-                self.onnxruntime_latencies_ns.append(session_elapsed_ns)
                 self.callback_latencies_ns.append(callback_elapsed_ns)
                 if header_latency_ns is not None:
                     self.end_to_end_latencies_ns.append(header_latency_ns)
@@ -240,6 +271,9 @@ class InferenceNode(Node):
             input_batch, input_channels, input_height, input_width = input_shape
         else:
             input_batch, input_height, input_width, input_channels = input_shape
+        deadline_ms = float(self.get_parameter("deadline_ms").value)
+        deadline_ns = int(round(deadline_ms * 1_000_000))
+        deadline_missed_frames = int(sum(1 for lat in self.latencies_ns if lat > deadline_ns))
         record = {
             "model_name": self.model_path.stem,
             "dataset": str(self.get_parameter("dataset").value),
@@ -269,6 +303,17 @@ class InferenceNode(Node):
             "last_frame_error": self.last_frame_error,
             "error_message": self.last_frame_error or self.clock_error_message,
             "duration": int(round(float(np.mean(self.latencies_ns)))),
+            "deadline_ms": deadline_ms,
+            "deadline_missed_frames": deadline_missed_frames,
+            "missed_deadlines": deadline_missed_frames,
+            "cpu_runs": None,
+            "gpu_runs": None,
+            "npu_duration": None,
+            "npu_min_duration": None,
+            "npu_max_duration": None,
+            "npu_std_dev": None,
+            "npu_runs": 0,
+            "npu_error": None,
             "unit": device_type,
             "runtime": "ONNX Runtime",
             "onnxruntime_provider": self.session.get_providers()[0],
@@ -277,12 +322,10 @@ class InferenceNode(Node):
             "inference_time_scope": (
                 "image_preprocessing_through_l2_normalization_and_output_publish"
             ),
-            "onnxruntime_latency_scope": "session.run_only",
             "model_size_bytes": self.model_path.stat().st_size,
             "input_shape": input_shape,
             "output_shape": output_shape,
-            "latency_ns": timing_stats(self.latencies_ns),
-            "onnxruntime_latency_ns": timing_stats(self.onnxruntime_latencies_ns),
+            "latency_ns": timing_stats(self.latencies_ns, deadline_ns=deadline_ns),
             "end_to_end_latency_ns": (
                 timing_stats(self.end_to_end_latencies_ns)
                 if self.end_to_end_latencies_ns
@@ -301,7 +344,11 @@ class InferenceNode(Node):
                 "python_version": platform.python_version(),
                 "ros_distro": os.environ.get("ROS_DISTRO", "unknown"),
                 "cpu_cores": os.cpu_count(),
+                "cpu_affinity": get_cpu_affinity(),
+                "cpu_frequencies": sample_cpu_frequencies(),
+                "temperatures": sample_temperatures(),
                 "onnxruntime_version": ort.__version__,
+                "onnx_num_threads": int(self.get_parameter("onnx_num_threads").value) or None,
                 "providers": self.session.get_providers(),
             },
         }
@@ -315,7 +362,12 @@ class InferenceNode(Node):
         self.get_logger().info(f"Saved {self.iterations}-frame benchmark to {output_path}")
 
     def stop_after_benchmark(self):
-        self.shutdown_timer.cancel()
+        if self.ready_timer is not None:
+            self.ready_timer.cancel()
+            self.ready_timer = None
+        if self.shutdown_timer is not None:
+            self.shutdown_timer.cancel()
+            self.shutdown_timer = None
         rclpy.try_shutdown()
 
 
@@ -326,8 +378,10 @@ def main(args=None):
     try:
         node = InferenceNode()
         executor.add_node(node)
-        while rclpy.ok():
-            executor.spin_once(timeout_sec=0.1)
+        try:
+            executor.spin()
+        except ExternalShutdownException:
+            pass
     finally:
         if node is not None:
             executor.remove_node(node)

@@ -86,11 +86,13 @@ python -m ab.bot.port --ros-args \
 ```
 
 The output is a `std_msgs/Float32MultiArray` containing the first model output.
-Ten incoming frames are used for warm-up by default; the next 20 are timed.
-Set `warmup_runs`, `iterations`, `input_scale`, `input_mean`, and `input_std`
-as ROS parameters to match the model's preprocessing. The default preprocessing
-resizes with nearest-neighbor sampling, converts RGB pixels to float32 in
-`[0, 1]`, and supports NCHW or NHWC input layouts.
+Ten incoming frames are used for warm-up by default; the next 500 frames are timed
+(configurable with `iterations`, recommended 500–1000 frames).
+Set `warmup_runs`, `iterations`, `deadline_ms`, `cpu_affinity`, `onnx_num_threads`,
+`input_scale`, `input_mean`, and `input_std`
+as ROS parameters to match the model's preprocessing and execution constraints.
+The default preprocessing resizes with nearest-neighbor sampling, converts RGB
+pixels to float32 in `[0, 1]`, and supports NCHW or NHWC input layouts.
 
 Results are written to
 `stats/<model>/robot_<dataset>_<hostname>.json` by default. Select an execution
@@ -100,13 +102,24 @@ by the installed ONNX Runtime build.
 
 The standalone ONNX node's primary `latency_ns` measures image conversion and
 preprocessing through ONNX inference, L2-normalization of its output, and
-publishing that output.
-`onnxruntime_latency_ns` separately reports only the selected ONNX Runtime
-provider's `session.run()` latency. Use the NN-Dataset pipeline below for the
-PyTorch CPU/CUDA profile and output-consistency checks.
+publishing that output. Every timing summary includes `avg`, `median`, `p95`,
+`p99`, `min`, `max`, `std`, and individual `samples`. Standard deviation uses
+population standard deviation (dividing by N, `ddof=0`), matching nn-lite's
+convention. `deadline_missed_frames` reports how many frames exceeded the
+configured deadline (default: 33 ms at 30 Hz).
+
+To ensure controlled measurement conditions:
+- **CPU Pinning**: Pin the process to a specific core using `cpu_affinity` (e.g. `-p cpu_affinity:=0`).
+- **Fixed Clocks**: CPU scaling governors and frequencies are monitored and logged in `device_analytics.cpu_frequencies`.
+- **ONNX Thread Limit**: ONNX Runtime intra-op threads are constrained via `onnx_num_threads` (default: 1) to avoid unconstrained thread contention.
+- **Temperature Logging**: System and GPU temperatures are sampled and logged in `device_analytics.temperatures`.
+- **Event-Driven Execution**: Node execution uses blocking `spin()` instead of polling `spin_once(0.1)` in a tight loop.
+
 The `input_shape` field retains the model's actual tensor layout; `in_dim_0`
 through `in_dim_3` use NN-Lite's batch, height, width, channels order so records
-can be merged with that schema. `unit` identifies the host hardware, while
+can be merged with that schema. NPU fields (`npu_duration`, `npu_min_duration`,
+`npu_max_duration`, `npu_std_dev`, `npu_runs`, `npu_error`) are included in the
+schema for compatibility. `unit` identifies the host hardware, while
 `onnxruntime_provider` identifies the ONNX Runtime provider used for inference.
 
 ## Run NN-Dataset Models
@@ -142,7 +155,7 @@ logits are checked with `rtol=0.01, atol=0.002`; PyTorch/ONNX outputs use
 provider as a stable reference; the ROS ONNX measurement prefers CUDA when
 available and records its active provider. Finite-value and top-class agreement
 are recorded. Every timing summary keeps its individual samples and includes
-mean, median, and p95.
+mean, median, p95, p99, and max.
 
 Before profiling each model, the pipeline samples NVIDIA GPU utilization and
 memory use. It warns by default when utilization or memory use exceeds 20%;
@@ -151,10 +164,12 @@ limits. Use `--gpu-busy-policy fail` to skip the profile and mark the model as
 failed when a measured threshold is exceeded. When `nvidia-smi` is unavailable,
 the record notes that GPU load could not be checked.
 
-The ROS node measures 20 image-message inferences after 10 warm-ups. Its primary
+The ROS node measures 500 image-message inferences after 10 warm-ups by default
+(configurable with `--iterations`, recommended 500–1000 frames). Its primary
 `latency_ns` interval starts before image conversion/preprocessing and ends after
-publishing the L2-normalized model output; `onnxruntime_latency_ns` records the
-nested `session.run()` interval alone. For a reproducible ROS image-stream emulation,
+publishing the L2-normalized model output, reporting `p99`, `max`, and
+`deadline_missed_frames` against the configured deadline (default: 33 ms at 30 Hz).
+For a reproducible ROS image-stream emulation,
 add `--emulate-camera`; the pipeline starts a separate ROS 2 publisher that
 sends stamped 640x480 RGB test frames at 30 Hz by default. Set
 `--camera-rate-hz` to change the rate. For example:
@@ -273,8 +288,9 @@ ONNX consistency check; CUDA is optional when unavailable or unsupported.
 `duration`, `unit`, and `inference_time_scope` in the merged record retain the
 ROS image-to-published-output measurement. The validated PyTorch forward-pass
 summary is kept separately in `pytorch_duration`, `pytorch_unit`, and
-`pytorch_inference_time_scope`, alongside the per-backend CPU/CUDA metrics. The
-`onnxruntime_latency_ns` field retains the ROS node's ONNX `session.run()` timing.
+`pytorch_inference_time_scope`, alongside the per-backend CPU/CUDA metrics.
+The `latency_ns` distribution captures detailed latency percentiles (including
+`p95`, `p99`, and `max`) and deadline misses.
 Dataset-specific filenames keep results for different datasets separate.
 Existing valid
 records for the selected dataset are skipped when resuming; pass `--force` to

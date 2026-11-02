@@ -7,10 +7,14 @@ from types import SimpleNamespace
 from ab.bot.runtime import (
     device_name,
     dropped_frames_between,
+    get_cpu_affinity,
     header_to_publish_latency_ns,
     l2_normalize,
     message_stamp_ns,
     preprocess_image,
+    sample_cpu_frequencies,
+    sample_temperatures,
+    set_cpu_affinity,
     synthetic_rgb_frame,
     timing_stats,
 )
@@ -49,18 +53,16 @@ class RuntimeTests(unittest.TestCase):
         np.testing.assert_array_equal(result, np.zeros((1, 3), dtype=np.float32))
 
     def test_timing_statistics_use_nanoseconds(self):
-        self.assertEqual(
-            timing_stats([10, 20, 30]),
-            {
-                "avg": 20.0,
-                "median": 20.0,
-                "p95": 29.0,
-                "min": 10.0,
-                "max": 30.0,
-                "std": 10.0,
-                "samples": [10.0, 20.0, 30.0],
-            },
-        )
+        stats = timing_stats([10, 20, 30], deadline_ns=25)
+        self.assertEqual(stats["avg"], 20.0)
+        self.assertEqual(stats["median"], 20.0)
+        self.assertEqual(stats["p95"], 29.0)
+        self.assertAlmostEqual(stats["p99"], 29.8)
+        self.assertEqual(stats["min"], 10.0)
+        self.assertEqual(stats["max"], 30.0)
+        self.assertAlmostEqual(stats["std"], float(np.std([10, 20, 30])))
+        self.assertEqual(stats["samples"], [10.0, 20.0, 30.0])
+        self.assertEqual(stats["deadline_misses"], 1)
 
     def test_timing_statistics_handle_one_sample(self):
         self.assertEqual(
@@ -69,6 +71,7 @@ class RuntimeTests(unittest.TestCase):
                 "avg": 10.0,
                 "median": 10.0,
                 "p95": 10.0,
+                "p99": 10.0,
                 "min": 10.0,
                 "max": 10.0,
                 "std": 0.0,
@@ -77,11 +80,29 @@ class RuntimeTests(unittest.TestCase):
         )
 
     def test_timing_statistics_keep_samples_and_report_percentiles(self):
-        stats = timing_stats(list(range(1, 21)))
+        stats = timing_stats(list(range(1, 101)))
 
-        self.assertEqual(len(stats["samples"]), 20)
-        self.assertEqual(stats["median"], 10.5)
-        self.assertAlmostEqual(stats["p95"], 19.05)
+        self.assertEqual(len(stats["samples"]), 100)
+        self.assertEqual(stats["median"], 50.5)
+        self.assertAlmostEqual(stats["p95"], 95.05)
+        self.assertAlmostEqual(stats["p99"], 99.01)
+        self.assertEqual(stats["max"], 100.0)
+
+    def test_cpu_affinity_helpers(self):
+        affinity = get_cpu_affinity()
+        if affinity is not None:
+            self.assertIsInstance(affinity, list)
+            self.assertTrue(len(affinity) > 0)
+            # Setting to first available core should succeed
+            self.assertTrue(set_cpu_affinity([affinity[0]]))
+            self.assertIn(affinity[0], get_cpu_affinity())
+
+    def test_sample_cpu_frequencies_and_temperatures(self):
+        # Functions should execute without crashing and return dict or None
+        freqs = sample_cpu_frequencies()
+        self.assertTrue(freqs is None or isinstance(freqs, dict))
+        temps = sample_temperatures()
+        self.assertTrue(temps is None or isinstance(temps, dict))
 
     def test_device_name_is_not_empty(self):
         self.assertTrue(device_name())

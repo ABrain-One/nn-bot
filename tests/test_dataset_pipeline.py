@@ -33,7 +33,10 @@ class DatasetPipelineTests(unittest.TestCase):
 	def test_cli_saves_results_under_stats_by_default(self):
 		self.assertEqual(parser().parse_args(["--model", "AirNet"]).results_dir, Path("stats"))
 		args = parser().parse_args(["--model", "AirNet"])
-		self.assertEqual((args.warmup_runs, args.iterations), (10, 20))
+		self.assertEqual((args.warmup_runs, args.iterations), (10, 500))
+		self.assertEqual(args.deadline_ms, 33.0)
+		self.assertIsNone(args.cpu_affinity)
+		self.assertEqual(args.onnx_num_threads, 1)
 
 	def test_cli_supports_export_only(self):
 		self.assertTrue(parser().parse_args(["--model", "AirNet", "--export-only"]).export_only)
@@ -104,7 +107,6 @@ class DatasetPipelineTests(unittest.TestCase):
 				"unit": "Robot Hardware",
 				"inference_time_scope": "image_preprocessing_through_output_publish",
 				"latency_ns": {"avg": 456.0},
-				"onnxruntime_latency_ns": {"avg": 123.0},
 				"device_analytics": {
 					"timestamp": "ort-time",
 					"onnxruntime_version": "test-ort",
@@ -113,13 +115,15 @@ class DatasetPipelineTests(unittest.TestCase):
 			}))
 			profile = {
 				"cpu_duration": 200, "cpu_min_duration": 190, "cpu_max_duration": 210,
-				"cpu_median_duration": 200, "cpu_p95_duration": 209,
+				"cpu_median_duration": 200, "cpu_p95_duration": 209, "cpu_p99_duration": 209,
 				"cpu_std_dev": 10.0, "cpu_runs": 20, "cpu_error": None,
 				"cpu_runs_ns": [200] * 20,
 				"gpu_duration": 100, "gpu_min_duration": 95, "gpu_max_duration": 105,
-				"gpu_median_duration": 100, "gpu_p95_duration": 105,
+				"gpu_median_duration": 100, "gpu_p95_duration": 105, "gpu_p99_duration": 105,
 				"gpu_std_dev": 5.0, "gpu_runs": 20, "gpu_error": None,
 				"gpu_runs_ns": [100] * 20,
+				"npu_duration": None, "npu_min_duration": None, "npu_max_duration": None,
+				"npu_std_dev": None, "npu_runs": 0, "npu_error": None,
 				"duration": 100, "unit": "Test GPU", "iterations": 20,
 				"warmup_runs": 10, "torch_cpu_threads": 4, "torch_gpu_name": "Test GPU",
 				"cpu_finite": True, "gpu_finite": True, "cpu_gpu_match": True,
@@ -140,10 +144,15 @@ class DatasetPipelineTests(unittest.TestCase):
 			}
 			self.assertTrue(_merge_profile("AirNet", args, profile))
 			record = json.loads(path.read_text())
-			self.assertEqual(record["onnxruntime_latency_ns"], {"avg": 123.0})
+			self.assertNotIn("onnxruntime_latency_ns", record)
+			self.assertEqual(record["latency_ns"], {"avg": 456.0})
 			self.assertEqual(record["cpu_duration"], 200)
+			self.assertEqual(record["cpu_p99_duration"], 209)
 			self.assertEqual(record["gpu_duration"], 100)
 			self.assertEqual(record["gpu_p95_duration"], 105)
+			self.assertEqual(record["gpu_p99_duration"], 105)
+			self.assertIsNone(record["npu_duration"])
+			self.assertEqual(record["npu_runs"], 0)
 			self.assertEqual(record["duration"], 456)
 			self.assertEqual(record["unit"], "Robot Hardware")
 			self.assertEqual(
@@ -197,13 +206,15 @@ class DatasetPipelineTests(unittest.TestCase):
 			}))
 			profile = {
 				"cpu_duration": 200, "cpu_min_duration": 190, "cpu_max_duration": 210,
-				"cpu_median_duration": 200, "cpu_p95_duration": 209,
+				"cpu_median_duration": 200, "cpu_p95_duration": 209, "cpu_p99_duration": 209,
 				"cpu_std_dev": 10.0, "cpu_runs": 20, "cpu_error": None,
 				"cpu_runs_ns": [200] * 20,
 				"gpu_duration": None, "gpu_min_duration": None, "gpu_max_duration": None,
-				"gpu_median_duration": None, "gpu_p95_duration": None,
+				"gpu_median_duration": None, "gpu_p95_duration": None, "gpu_p99_duration": None,
 				"gpu_std_dev": None, "gpu_runs": 0, "gpu_error": "CUDA is not available",
 				"gpu_runs_ns": [],
+				"npu_duration": None, "npu_min_duration": None, "npu_max_duration": None,
+				"npu_std_dev": None, "npu_runs": 0, "npu_error": None,
 				"duration": 200, "unit": "CPU", "iterations": 20,
 				"warmup_runs": 10, "torch_cpu_threads": 4, "torch_gpu_name": None,
 				"cpu_finite": True, "gpu_finite": None, "cpu_gpu_match": None,
