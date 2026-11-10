@@ -2,6 +2,7 @@
 
 import argparse
 import ast
+import csv
 import datetime
 import gc
 import importlib
@@ -726,9 +727,7 @@ def _merge_profile(model_name, args, profile):
     else:
         record["error_message"] = None
 
-    temporary_path = path.with_suffix(path.suffix + ".tmp")
-    temporary_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
-    temporary_path.replace(path)
+    _write_nn_stat_exports(path, model_name, record)
     return record["valid"]
 
 
@@ -741,6 +740,52 @@ def _inference_failure_message(returncode, input_topic):
     if returncode != 0:
         return f"ROS node exited with status {returncode}"
     return None
+
+
+def _nn_stat_record(record, model_name):
+    metric = record["metric"]
+    if metric == "accuracy":
+        metric = "acc"
+    accuracy = record.get("training_accuracy")
+    duration_ns = record["duration"]
+    return {
+        "task": record["task"],
+        "dataset": record["dataset"],
+        "epoch": record["checkpoint_epoch"],
+        "metric": metric,
+        "accuracy": accuracy,
+        "duration": duration_ns / 1_000_000_000,
+        "nn": model_name,
+        "accuracy_source": (
+            "checkpoint_training_accuracy" if accuracy is not None else "unavailable"
+        ),
+        "duration_unit": "seconds_per_inference",
+        "duration_source": record["inference_time_scope"],
+    }
+
+
+def _write_nn_stat_csv(path, nn_stat_record):
+    columns = (
+        "task", "dataset", "epoch", "metric", "accuracy", "duration", "nn",
+        "accuracy_source", "duration_unit", "duration_source",
+    )
+    temporary_path = path.with_suffix(path.suffix + ".tmp")
+    with temporary_path.open("w", encoding="utf-8", newline="") as output_file:
+        writer = csv.DictWriter(output_file, fieldnames=columns)
+        writer.writeheader()
+        writer.writerow(nn_stat_record)
+    temporary_path.replace(path)
+
+
+def _write_nn_stat_exports(path, model_name, record=None):
+    if record is None:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    nn_stat = _nn_stat_record(record, model_name)
+    record["nn_stat"] = nn_stat
+    temporary_path = path.with_suffix(path.suffix + ".tmp")
+    temporary_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+    temporary_path.replace(path)
+    _write_nn_stat_csv(path.with_name(f"{path.stem}_nn_stat.csv"), nn_stat)
 
 
 def _run_model(model_path, model_name, args):
@@ -990,6 +1035,7 @@ def main(args=None):
                 print(f"[EXPORTED] {model_path}")
                 continue
             if _has_complete_record(name, args) and not args.force:
+                _write_nn_stat_exports(_report_path(name, args), name)
                 print(f"[SKIP] {name}: valid CPU/GPU profile already exists")
                 completed += 1
                 continue

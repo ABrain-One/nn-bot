@@ -122,6 +122,27 @@ can be merged with that schema. NPU fields (`npu_duration`, `npu_min_duration`,
 schema for compatibility. `unit` identifies the host hardware, while
 `onnxruntime_provider` identifies the ONNX Runtime provider used for inference.
 
+For NN-Stat interoperability, each merged result also includes an `nn_stat`
+object in the JSON record and writes
+`stats/<model>/robot_<dataset>_<hostname>_nn_stat.csv`. The CSV contains the
+`task`, `dataset`, `epoch`, `metric`, `accuracy`, `duration`, and `nn` columns
+used by NN-Stat's `process_data()`; it also includes source and unit columns.
+`metric` uses NN-Stat's `acc` code. `accuracy` is the checkpoint's reported
+training accuracy, not accuracy re-measured by this inference run. `duration`
+is the mean ONNX inference latency in seconds per image, not training duration.
+The existing JSON `duration` and all timing fields remain unchanged.
+
+The CSV can be passed directly to NN-Stat's processor:
+
+```python
+import pandas as pd
+from ab.stat.util.process_data import process_data
+
+aggregated = process_data(pd.read_csv(
+    "stats/AirNet/robot_cifar-10_<hostname>_nn_stat.csv"
+))
+```
+
 ## Run NN-Dataset Models
 
 Build and source the ROS package in the same shell:

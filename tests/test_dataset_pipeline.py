@@ -1,5 +1,6 @@
 import unittest
 import json
+import csv
 from pathlib import Path
 import sys
 from types import SimpleNamespace
@@ -12,6 +13,7 @@ from ab.bot.dataset_pipeline import (
 	_inference_failure_message,
 	_merge_profile,
 	_replace_adaptive_avg_pools,
+	_write_nn_stat_exports,
 	assess_gpu_load,
 	infer_shapes,
 	parser,
@@ -233,7 +235,45 @@ class DatasetPipelineTests(unittest.TestCase):
 				False,
 			)
 			self.assertEqual(record["device_analytics"]["onnxruntime_timestamp"], "ort-time")
+			self.assertEqual(
+				record["nn_stat"],
+				{
+					"task": "img-classification",
+					"dataset": "cifar-10",
+					"epoch": 50,
+					"metric": "acc",
+					"accuracy": 0.9,
+					"duration": 456 / 1_000_000_000,
+					"nn": "AirNet",
+					"accuracy_source": "checkpoint_training_accuracy",
+					"duration_unit": "seconds_per_inference",
+					"duration_source": "image_preprocessing_through_output_publish",
+				},
+			)
+			nn_stat_csv = path.with_name(f"{path.stem}_nn_stat.csv")
+			with nn_stat_csv.open(newline="", encoding="utf-8") as csv_file:
+				nn_stat_row = next(csv.DictReader(csv_file))
+			self.assertEqual(
+				{key: nn_stat_row[key] for key in (
+					"task", "dataset", "epoch", "metric", "accuracy", "nn"
+				)},
+				{
+					"task": "img-classification",
+					"dataset": "cifar-10",
+					"epoch": "50",
+					"metric": "acc",
+					"accuracy": "0.9",
+					"nn": "AirNet",
+				},
+			)
 			self.assertTrue(record["valid"])
+
+			record.pop("nn_stat")
+			path.write_text(json.dumps(record))
+			nn_stat_csv.unlink()
+			_write_nn_stat_exports(path, "AirNet")
+			self.assertIn("nn_stat", json.loads(path.read_text()))
+			self.assertTrue(nn_stat_csv.is_file())
 
 			profile["cpu_finite"] = False
 			profile["pytorch_onnx_match"] = False
