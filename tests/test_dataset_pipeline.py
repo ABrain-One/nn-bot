@@ -10,6 +10,7 @@ from ab.bot.dataset_pipeline import (
 	_camera_emulator_command,
 	_inference_command,
 	_merge_profile,
+	_replace_adaptive_avg_pools,
 	assess_gpu_load,
 	infer_shapes,
 	parser,
@@ -101,6 +102,45 @@ class DatasetPipelineTests(unittest.TestCase):
 
 	def test_pipeline_uses_current_python_for_ros_node(self):
 		self.assertEqual(_inference_command()[1:], ["-m", "ab.bot.port", "--ros-args"])
+
+	def test_adaptive_average_pool_exports_and_matches_torch(self):
+		try:
+			import onnxruntime
+			import torch
+		except ImportError as error:
+			self.skipTest(str(error))
+
+		model = torch.nn.Sequential(
+			torch.nn.AdaptiveAvgPool2d((6, 6)),
+			torch.nn.Flatten(),
+			torch.nn.Linear(3 * 6 * 6, 2),
+		).eval()
+		example = torch.randn(1, 3, 8, 8)
+		expected = model(example).detach().numpy()
+		_replace_adaptive_avg_pools(model, torch)
+
+		with TemporaryDirectory() as directory:
+			model_path = Path(directory) / "adaptive_pool.onnx"
+			torch.onnx.export(
+				model,
+				example,
+				str(model_path),
+				opset_version=17,
+				input_names=["input"],
+				output_names=["output"],
+				dynamic_axes={"input": {0: "batch"}, "output": {0: "batch"}},
+				dynamo=False,
+			)
+			session = onnxruntime.InferenceSession(
+				str(model_path), providers=["CPUExecutionProvider"]
+			)
+			actual = session.run(None, {"input": example.numpy()})[0]
+
+		self.assertTrue(
+			torch.allclose(
+				torch.from_numpy(actual), torch.from_numpy(expected), atol=1e-6
+			)
+		)
 
 	def test_merge_profile_preserves_onnx_timing_and_adds_backend_metrics(self):
 		with TemporaryDirectory() as directory:

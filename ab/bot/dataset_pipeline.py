@@ -152,6 +152,50 @@ def _load_torch_model(model_row, hf_hub_download, device):
     return torch, model, input_shape
 
 
+def _replace_adaptive_avg_pools(model, torch):
+    class ExportableAdaptiveAvgPool2d(torch.nn.Module):
+        def __init__(self, output_size):
+            super().__init__()
+            if isinstance(output_size, int):
+                output_size = (output_size, output_size)
+            self.output_size = output_size
+
+        def forward(self, tensor):
+            input_height, input_width = tensor.shape[-2:]
+            output_height = self.output_size[0] or input_height
+            output_width = self.output_size[1] or input_width
+            rows = []
+            for row in range(output_height):
+                start_height = row * input_height // output_height
+                end_height = (
+                    (row + 1) * input_height + output_height - 1
+                ) // output_height
+                columns = []
+                for column in range(output_width):
+                    start_width = column * input_width // output_width
+                    end_width = (
+                        (column + 1) * input_width + output_width - 1
+                    ) // output_width
+                    region = tensor[
+                        ..., start_height:end_height, start_width:end_width
+                    ]
+                    columns.append(
+                        region.mean(dim=(-2, -1), keepdim=True)
+                    )
+                rows.append(torch.cat(columns, dim=-1))
+            return torch.cat(rows, dim=-2)
+
+    for name, child in model.named_children():
+        if isinstance(child, torch.nn.AdaptiveAvgPool2d):
+            setattr(
+                model,
+                name,
+                ExportableAdaptiveAvgPool2d(child.output_size),
+            )
+        else:
+            _replace_adaptive_avg_pools(child, torch)
+
+
 def export_model(model_row, output_path, hf_hub_download):
     import torch
     import onnx
@@ -159,6 +203,7 @@ def export_model(model_row, output_path, hf_hub_download):
     output_path = Path(output_path)
     torch, model, input_shape = _load_torch_model(model_row, hf_hub_download, torch.device("cpu"))
 
+    _replace_adaptive_avg_pools(model, torch)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     export_options = {
         "opset_version": 17,
