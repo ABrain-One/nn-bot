@@ -37,6 +37,13 @@ class DatasetPipelineTests(unittest.TestCase):
 		self.assertEqual(args.deadline_ms, 33.0)
 		self.assertIsNone(args.cpu_affinity)
 		self.assertEqual(args.onnx_num_threads, 1)
+		self.assertEqual(args.camera_data_timeout, 120.0)
+		self.assertEqual(
+			parser().parse_args(
+				["--model", "AirNet", "--camera-data-timeout", "45"]
+			).camera_data_timeout,
+			45.0,
+		)
 
 	def test_cli_supports_export_only(self):
 		self.assertTrue(parser().parse_args(["--model", "AirNet", "--export-only"]).export_only)

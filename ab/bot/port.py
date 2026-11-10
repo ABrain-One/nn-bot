@@ -40,6 +40,7 @@ class InferenceNode(Node):
         super().__init__("nn_bot_inference")
         self.declare_parameter("model_path", "")
         self.declare_parameter("input_topic", "/camera/image_raw")
+        self.declare_parameter("camera_data_timeout", 120.0)
         self.declare_parameter("output_topic", "/nn_bot/output")
         self.declare_parameter("results_dir", "stats")
         self.declare_parameter("dataset", "custom")
@@ -74,6 +75,11 @@ class InferenceNode(Node):
             raise FileNotFoundError(f"ONNX model not found: {model_path}")
         self.synthetic_input = bool(self.get_parameter("synthetic_input").value)
         self.camera_rate_hz = float(self.get_parameter("camera_rate_hz").value)
+        self.camera_data_timeout = float(
+            self.get_parameter("camera_data_timeout").value
+        )
+        if not math.isfinite(self.camera_data_timeout) or self.camera_data_timeout <= 0:
+            raise ValueError("camera_data_timeout must be finite and positive")
         if self.synthetic_input and (
             not math.isfinite(self.camera_rate_hz) or self.camera_rate_hz <= 0
         ):
@@ -135,6 +141,9 @@ class InferenceNode(Node):
         self.last_frame_error = None
         self.record_saved = False
         self.shutdown_timer = None
+        self.input_topic = str(self.get_parameter("input_topic").value)
+        self.last_camera_data_at = time.monotonic()
+        self.camera_data_timeout_expired = False
         self.output_publisher = self.create_publisher(
             Float32MultiArray, str(self.get_parameter("output_topic").value), 10
         )
@@ -148,9 +157,12 @@ class InferenceNode(Node):
         )
         self.subscription = self.create_subscription(
             Image,
-            str(self.get_parameter("input_topic").value),
+            self.input_topic,
             self.on_image,
             image_qos,
+        )
+        self.camera_data_timeout_timer = self.create_timer(
+            min(1.0, self.camera_data_timeout), self.check_camera_data_timeout
         )
         # Transient-local readiness lets the launcher start acquisition only after
         # the ONNX session and image subscription are ready, even if it subscribes late.
@@ -173,7 +185,7 @@ class InferenceNode(Node):
         )
         self.get_logger().info(
             f"[NN_BOT_READY] model/session initialized; subscribed to "
-            f"{self.get_parameter('input_topic').value}"
+            f"{self.input_topic}"
         )
 
     def publish_readiness(self):
@@ -192,6 +204,7 @@ class InferenceNode(Node):
         # benchmark counters are updated. QoS depth=1 bounds any queued backlog.
         if not self.ready:
             return
+        self.last_camera_data_at = time.monotonic()
         if self.startup_frames_dropped < self.startup_drop_frames:
             self.startup_frames_dropped += 1
             return
@@ -264,6 +277,16 @@ class InferenceNode(Node):
             self.failed_frames += 1
             self.last_frame_error = f"{type(error).__name__}: {error}"
             self.get_logger().error(f"Inference failed: {error}")
+
+    def check_camera_data_timeout(self):
+        if time.monotonic() - self.last_camera_data_at < self.camera_data_timeout:
+            return
+        self.camera_data_timeout_expired = True
+        self.get_logger().warning(
+            "No images received on "
+            f"{self.input_topic}. Start a camera publisher or use --emulate-camera."
+        )
+        rclpy.try_shutdown()
 
     def save_record(self, input_shape, output_shape):
         device_type = device_name()
@@ -382,6 +405,11 @@ def main(args=None):
             executor.spin()
         except ExternalShutdownException:
             pass
+        if node.camera_data_timeout_expired:
+            raise RuntimeError(
+                f"No image data received on {node.input_topic} within "
+                f"{node.camera_data_timeout}s"
+            )
     finally:
         if node is not None:
             executor.remove_node(node)

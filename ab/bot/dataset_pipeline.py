@@ -707,6 +707,7 @@ def _run_model(model_path, model_name, args):
         "dataset": args.dataset,
         "synthetic_input": args.emulate_camera,
         "camera_rate_hz": args.camera_rate_hz if args.emulate_camera else 0.0,
+        "camera_data_timeout": args.camera_data_timeout,
         "warmup_runs": args.warmup_runs,
         "iterations": args.iterations,
         "startup_drop_frames": args.startup_drop_frames,
@@ -823,6 +824,12 @@ def parser():
     )
     ap.add_argument("--camera-rate-hz", type=float, default=30.0)
     ap.add_argument(
+        "--camera-data-timeout",
+        type=float,
+        default=120.0,
+        help="Fail if no image data arrives for this many seconds",
+    )
+    ap.add_argument(
         "--gpu-busy-policy",
         choices=("warn", "fail"),
         default="warn",
@@ -872,8 +879,16 @@ def main(args=None):
     args = ap.parse_args(args)
     if args.limit is not None and args.limit < 1:
         ap.error("--limit must be at least 1")
-    if args.iterations < 1 or args.warmup_runs < 0 or args.model_timeout <= 0:
-        ap.error("iterations and model-timeout must be positive; warmup-runs cannot be negative")
+    if (
+        args.iterations < 1
+        or args.warmup_runs < 0
+        or args.model_timeout <= 0
+        or not math.isfinite(args.camera_data_timeout)
+        or args.camera_data_timeout <= 0
+    ):
+        ap.error(
+            "iterations and timeouts must be positive; warmup-runs cannot be negative"
+        )
     if args.startup_drop_frames < 0:
         ap.error("--startup-drop-frames cannot be negative")
     if not math.isfinite(args.camera_rate_hz) or args.camera_rate_hz <= 0:
