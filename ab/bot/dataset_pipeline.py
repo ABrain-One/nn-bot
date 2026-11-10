@@ -862,7 +862,7 @@ def parser():
     ap.add_argument("--input-scale", type=float, default=1.0 / 255.0)
     ap.add_argument("--input-mean", type=float, nargs="+")
     ap.add_argument("--input-std", type=float, nargs="+")
-    ap.add_argument("--model-timeout", type=float, default=1800)
+    ap.add_argument("--model-timeout", type=float, default=120)
     ap.add_argument("--force", action="store_true", help="Re-export and benchmark existing results")
     return ap
 
