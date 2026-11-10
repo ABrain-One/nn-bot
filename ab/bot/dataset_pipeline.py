@@ -22,6 +22,7 @@ from pathlib import Path
 import numpy as np
 
 from ab.bot.runtime import (
+    CAMERA_DATA_TIMEOUT_EXIT_CODE,
     get_cpu_affinity,
     sample_cpu_frequencies,
     sample_gpus,
@@ -731,6 +732,17 @@ def _merge_profile(model_name, args, profile):
     return record["valid"]
 
 
+def _inference_failure_message(returncode, input_topic):
+    if returncode == CAMERA_DATA_TIMEOUT_EXIT_CODE:
+        return (
+            f"No images received on {input_topic}. Start a camera publisher "
+            "or use --emulate-camera."
+        )
+    if returncode != 0:
+        return f"ROS node exited with status {returncode}"
+    return None
+
+
 def _run_model(model_path, model_name, args):
     report_path = _report_path(model_name, args)
     if _has_complete_record(model_name, args) and not args.force:
@@ -799,18 +811,18 @@ def _run_model(model_path, model_name, args):
                     check=False,
                 )
             except subprocess.TimeoutExpired as error:
-                raise RuntimeError(
+                return (
                     f"Inference node did not become ready within the readiness timeout "
                     f"on {args.ready_topic}"
-                ) from error
+                )
             if ready_result.returncode != 0 or "data: true" not in ready_result.stdout.lower():
                 detail = (ready_result.stderr or ready_result.stdout).strip()
-                raise RuntimeError(
+                return (
                     f"Could not confirm inference readiness on {args.ready_topic}: "
                     f"{detail or 'no true readiness message received'}"
                 )
             if inference_process.poll() is not None:
-                raise RuntimeError(
+                return (
                     f"Inference process exited before camera startup "
                     f"(status {inference_process.returncode})"
                 )
@@ -821,10 +833,9 @@ def _run_model(model_path, model_name, args):
         try:
             result_returncode = inference_process.wait(timeout=args.model_timeout)
         except subprocess.TimeoutExpired:
-            raise RuntimeError(f"benchmark exceeded {args.model_timeout}s")
+            return f"benchmark exceeded {args.model_timeout}s"
     except (OSError, RuntimeError) as error:
-        print(f"[FAIL] {model_name}: {error}")
-        return False
+        return str(error)
     finally:
         if camera_publisher is not None:
             camera_publisher.send_signal(signal.SIGINT)
@@ -840,9 +851,13 @@ def _run_model(model_path, model_name, args):
             except subprocess.TimeoutExpired:
                 inference_process.kill()
                 inference_process.wait()
-    if result_returncode != 0 or not report_path.exists():
-        print(f"[FAIL] {model_name}: ROS node exited with status {result_returncode}")
-        return False
+    failure_message = _inference_failure_message(
+        result_returncode, args.input_topic
+    )
+    if failure_message is not None:
+        return failure_message
+    if not report_path.exists():
+        return "ROS node exited without producing a benchmark report"
     return True
 
 
@@ -871,7 +886,7 @@ def parser():
     ap.add_argument(
         "--camera-data-timeout",
         type=float,
-        default=120.0,
+        default=90.0,
         help="Fail if no image data arrives for this many seconds",
     )
     ap.add_argument(
@@ -934,6 +949,8 @@ def main(args=None):
         ap.error(
             "iterations and timeouts must be positive; warmup-runs cannot be negative"
         )
+    if args.camera_data_timeout >= args.model_timeout:
+        ap.error("--camera-data-timeout must be less than --model-timeout")
     if args.startup_drop_frames < 0:
         ap.error("--startup-drop-frames cannot be negative")
     if not math.isfinite(args.camera_rate_hz) or args.camera_rate_hz <= 0:
@@ -958,6 +975,7 @@ def main(args=None):
     print(f"[SETUP] {len(models)} model(s), dataset={args.dataset}")
     completed = 0
     failed = []
+    failure_reasons = {}
     for index, model in enumerate(models, 1):
         name = model["nn"]
         print(f"\n[{index}/{len(models)}] {name}", flush=True)
@@ -993,13 +1011,16 @@ def main(args=None):
                 print(f"[FAIL] {name}: GPU became busy before CUDA profiling", flush=True)
                 failed.append(name)
                 continue
-            if _run_model(model_path, name, args):
+            run_result = _run_model(model_path, name, args)
+            if run_result is True:
                 if _merge_profile(name, args, profile):
                     completed += 1
                 else:
                     failed.append(name)
             else:
                 failed.append(name)
+                failure_reasons[name] = str(run_result)
+                print(f"[FAIL] {name}: {run_result}", flush=True)
         except Exception as error:
             print(f"[FAIL] {name}: {error}", flush=True)
             failed.append(name)
@@ -1007,6 +1028,9 @@ def main(args=None):
     print(f"\n[SUMMARY] successful={completed}, failed={len(failed)}")
     if failed:
         print("Failed models: " + ", ".join(failed))
+        for name in failed:
+            if name in failure_reasons:
+                print(f"[FAILURE] {name}: {failure_reasons[name]}")
         return 1
     return 0
 

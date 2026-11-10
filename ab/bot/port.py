@@ -21,6 +21,7 @@ from sensor_msgs.msg import Image
 from std_msgs.msg import Bool, Float32MultiArray, MultiArrayDimension
 
 from ab.bot.runtime import (
+    CAMERA_DATA_TIMEOUT_EXIT_CODE,
     device_name,
     dropped_frames_between,
     get_cpu_affinity,
@@ -40,7 +41,7 @@ class InferenceNode(Node):
         super().__init__("nn_bot_inference")
         self.declare_parameter("model_path", "")
         self.declare_parameter("input_topic", "/camera/image_raw")
-        self.declare_parameter("camera_data_timeout", 120.0)
+        self.declare_parameter("camera_data_timeout", 90.0)
         self.declare_parameter("output_topic", "/nn_bot/output")
         self.declare_parameter("results_dir", "stats")
         self.declare_parameter("dataset", "custom")
@@ -406,10 +407,7 @@ def main(args=None):
         except ExternalShutdownException:
             pass
         if node.camera_data_timeout_expired:
-            raise RuntimeError(
-                f"No image data received on {node.input_topic} within "
-                f"{node.camera_data_timeout}s"
-            )
+            return CAMERA_DATA_TIMEOUT_EXIT_CODE
     finally:
         if node is not None:
             executor.remove_node(node)
@@ -420,4 +418,4 @@ def main(args=None):
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

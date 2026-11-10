@@ -9,6 +9,7 @@ import socket
 from ab.bot.dataset_pipeline import (
 	_camera_emulator_command,
 	_inference_command,
+	_inference_failure_message,
 	_merge_profile,
 	_replace_adaptive_avg_pools,
 	assess_gpu_load,
@@ -38,7 +39,7 @@ class DatasetPipelineTests(unittest.TestCase):
 		self.assertEqual(args.deadline_ms, 33.0)
 		self.assertIsNone(args.cpu_affinity)
 		self.assertEqual(args.onnx_num_threads, 1)
-		self.assertEqual(args.camera_data_timeout, 120.0)
+		self.assertEqual(args.camera_data_timeout, 90.0)
 		self.assertEqual(
 			parser().parse_args(
 				["--model", "AirNet", "--camera-data-timeout", "45"]
@@ -102,6 +103,16 @@ class DatasetPipelineTests(unittest.TestCase):
 
 	def test_pipeline_uses_current_python_for_ros_node(self):
 		self.assertEqual(_inference_command()[1:], ["-m", "ab.bot.port", "--ros-args"])
+
+	def test_camera_timeout_has_actionable_failure_message(self):
+		from ab.bot.runtime import CAMERA_DATA_TIMEOUT_EXIT_CODE
+
+		self.assertEqual(
+			_inference_failure_message(CAMERA_DATA_TIMEOUT_EXIT_CODE, "/camera/raw"),
+			"No images received on /camera/raw. Start a camera publisher "
+			"or use --emulate-camera.",
+		)
+		self.assertIsNone(_inference_failure_message(0, "/camera/raw"))
 
 	def test_adaptive_average_pool_exports_and_matches_torch(self):
 		try:

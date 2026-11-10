@@ -9,6 +9,9 @@ from pathlib import Path
 import numpy as np
 
 
+CAMERA_DATA_TIMEOUT_EXIT_CODE = 75
+
+
 def _input_layout(shape):
     if len(shape) != 4 or shape[0] not in (1, "batch", None):
         raise ValueError(f"Expected a batch-one rank-4 model input, got {shape}")
