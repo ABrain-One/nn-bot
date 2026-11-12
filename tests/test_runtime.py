@@ -10,8 +10,10 @@ from ab.bot.runtime import (
     get_cpu_affinity,
     header_to_publish_latency_ns,
     l2_normalize,
+    load_preprocessing_manifest,
     message_stamp_ns,
     preprocess_image,
+    process_model_output,
     sample_cpu_frequencies,
     sample_temperatures,
     set_cpu_affinity,
@@ -37,6 +39,31 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(result.shape, (1, 2, 2, 3))
         np.testing.assert_array_equal(result[0, 0, 0], [127, 126, 125])
 
+    def test_preprocesses_with_manifest_resize_and_normalization(self):
+        image = np.full((2, 4, 3), 255, dtype=np.uint8)
+        operations = [
+            {"type": "resize", "size": 2, "mode": "shorter", "interpolation": "bilinear"},
+            {"type": "center_crop", "size": 2},
+            {"type": "to_tensor", "scale": 1.0 / 255.0},
+            {"type": "normalize", "mean": [0.5] * 3, "std": [0.25] * 3},
+        ]
+
+        result = preprocess_image(image, [1, 3, 2, 2], operations=operations)
+
+        np.testing.assert_array_equal(result, np.full((1, 3, 2, 2), 2.0, dtype=np.float32))
+
+    def test_manifest_loader_rejects_unsupported_version(self):
+        from tempfile import TemporaryDirectory
+        from pathlib import Path
+        import json
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "model.preprocess.json"
+            path.write_text(json.dumps({"version": 99, "operations": []}))
+
+            with self.assertRaisesRegex(ValueError, "Unsupported preprocessing manifest version"):
+                load_preprocessing_manifest(path)
+
     def test_rejects_ambiguous_model_input_shape(self):
         with self.assertRaises(ValueError):
             preprocess_image(np.zeros((2, 2, 3)), [1, 7, 8, 9])
@@ -51,6 +78,12 @@ class RuntimeTests(unittest.TestCase):
         result = l2_normalize(np.zeros((1, 3), dtype=np.float32))
 
         np.testing.assert_array_equal(result, np.zeros((1, 3), dtype=np.float32))
+
+    def test_model_output_is_raw_by_default_and_l2_is_opt_in(self):
+        output = np.array([[3.0, 4.0]], dtype=np.float32)
+
+        np.testing.assert_array_equal(process_model_output(output), output)
+        np.testing.assert_allclose(process_model_output(output, "l2"), [[0.6, 0.8]])
 
     def test_timing_statistics_use_nanoseconds(self):
         stats = timing_stats([10, 20, 30], deadline_ns=25)

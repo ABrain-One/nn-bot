@@ -25,6 +25,7 @@ import numpy as np
 from ab.bot.runtime import (
     CAMERA_DATA_TIMEOUT_EXIT_CODE,
     get_cpu_affinity,
+    PREPROCESSING_MANIFEST_VERSION,
     sample_cpu_frequencies,
     sample_gpus,
     sample_system,
@@ -53,6 +54,116 @@ def infer_shapes(dataset, transform):
         input_shape = (1, 3, 32, 32)
 
     return input_shape, (100 if dataset == "cifar-100" else 10,)
+
+
+def _dataset_normalization(dataset):
+    if dataset == "cifar-10":
+        return [0.4914, 0.4822, 0.4465], [0.2470, 0.2435, 0.2616]
+    if dataset == "cifar-100":
+        return [0.5071, 0.4867, 0.4408], [0.2675, 0.2565, 0.2761]
+    if dataset == "mnist":
+        return [0.1307], [0.3081]
+    if dataset == "imagenette":
+        return [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
+    return [], []
+
+
+def _build_preprocessing_manifest(
+    model_row, input_scale=1.0 / 255.0, input_mean=None, input_std=None
+):
+    """Translate a supported NN-Dataset inference transform into a portable manifest."""
+    dataset = model_row["dataset"]
+    transform_name = model_row.get("prm", {}).get("transform")
+    if not transform_name:
+        raise ValueError(f"NN-Dataset metadata has no transform for {model_row['nn']}")
+
+    module = importlib.import_module(f"ab.nn.transform.{transform_name}")
+    if not hasattr(module, "transform"):
+        raise RuntimeError(f"NN-Dataset transform {transform_name!r} has no transform function")
+    default_mean, default_std = _dataset_normalization(dataset)
+    if not default_mean or not default_std:
+        raise ValueError(f"No normalization metadata is available for dataset {dataset!r}")
+    transform = module.transform((tuple(default_mean), tuple(default_std)))
+    transforms = getattr(transform, "transforms", None)
+    if transforms is None:
+        raise ValueError(f"NN-Dataset transform {transform_name!r} is not a Compose transform")
+
+    operations = []
+    omitted_augmentations = []
+    has_normalize = False
+    for operation in transforms:
+        operation_name = type(operation).__name__
+        if operation_name == "RandomHorizontalFlip":
+            omitted_augmentations.append(operation_name)
+        elif operation_name == "Resize":
+            size = operation.size
+            resize = {
+                "type": "resize",
+                "size": list(size) if isinstance(size, (tuple, list)) else int(size),
+                "mode": "shorter" if isinstance(size, int) else "exact",
+                "interpolation": operation.interpolation.name.lower(),
+            }
+            operations.append(resize)
+        elif operation_name == "CenterCrop":
+            size = operation.size
+            operations.append(
+                {
+                    "type": "center_crop",
+                    "size": list(size) if isinstance(size, (tuple, list)) else int(size),
+                }
+            )
+        elif operation_name == "Grayscale":
+            operations.append({"type": "grayscale"})
+        elif operation_name == "ToTensor":
+            operations.append({"type": "to_tensor", "scale": float(input_scale)})
+        elif operation_name == "Normalize":
+            mean = input_mean if input_mean is not None else list(operation.mean)
+            std = input_std if input_std is not None else list(operation.std)
+            operations.append(
+                {"type": "normalize", "mean": list(mean), "std": list(std)}
+            )
+            has_normalize = True
+        else:
+            raise ValueError(
+                f"NN-Dataset transform {transform_name!r} contains unsupported "
+                f"operation {operation_name!r}; provide a supported deterministic transform"
+            )
+
+    if dataset == "mnist" and not any(op["type"] == "grayscale" for op in operations):
+        operations.insert(0, {"type": "grayscale"})
+    if not any(op["type"] == "to_tensor" for op in operations):
+        raise ValueError(f"NN-Dataset transform {transform_name!r} has no ToTensor operation")
+
+    if input_mean is not None and input_std is not None and not has_normalize:
+        operations.append(
+            {"type": "normalize", "mean": list(input_mean), "std": list(input_std)}
+        )
+
+    input_shape, _ = infer_shapes(dataset, transform_name)
+    if not any(op["type"] in {"resize", "center_crop"} for op in operations):
+        operations.insert(
+            next(index for index, op in enumerate(operations) if op["type"] == "to_tensor"),
+            {
+                "type": "resize",
+                "size": [input_shape[2], input_shape[3]],
+                "mode": "exact",
+                "interpolation": "bilinear",
+            },
+        )
+
+    if dataset == "mnist":
+        color_mode = "grayscale"
+    else:
+        color_mode = "RGB"
+    return {
+        "version": PREPROCESSING_MANIFEST_VERSION,
+        "model": model_row["nn"],
+        "dataset": dataset,
+        "transform": transform_name,
+        "color_mode": color_mode,
+        "omitted_training_augmentations": omitted_augmentations,
+        "operations": operations,
+    }
 
 
 def _load_dataset_dependencies():
@@ -566,16 +677,6 @@ def profile_model(
     return profile
 
 
-def _dataset_normalization(dataset):
-    if dataset in {"cifar-10", "cifar-100"}:
-        return [0.4914, 0.4822, 0.4465], [0.2023, 0.1994, 0.2010]
-    if dataset == "mnist":
-        return [0.1307], [0.3081]
-    if dataset == "imagenette":
-        return [0.485, 0.456, 0.406], [0.229, 0.224, 0.225]
-    return [], []
-
-
 def _inference_command():
     return [sys.executable, "-m", "ab.bot.port", "--ros-args"]
 
@@ -603,12 +704,21 @@ def _has_complete_record(model_name, args):
         return False
     try:
         record = json.loads(path.read_text(encoding="utf-8"))
+        manifest_path = (
+            args.onnx_dir
+            / args.dataset
+            / f"{model_name}.preprocess.json"
+        )
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return False
     return (
         record.get("valid") is True
         and record.get("dataset") == args.dataset
-        and record.get("profile_version") == 1
+        and record.get("profile_version") == 2
+        and record.get("preprocessing") == manifest
+        and record.get("output_normalization")
+        == getattr(args, "output_normalization", "none")
     )
 
 
@@ -645,7 +755,7 @@ def _merge_profile(model_name, args, profile):
         record[field] = profile[field]
     record["gpu_backend"] = "PyTorch CUDA" if profile["gpu_runs"] else None
     record["cpu_backend"] = "PyTorch CPU"
-    record["profile_version"] = 1
+    record["profile_version"] = 2
     analytics.update(profile["device_analytics"])
     analytics["onnxruntime_version"] = ort_version
     analytics["onnxruntime_providers"] = ort_providers
@@ -796,15 +906,12 @@ def _run_model(model_path, model_name, args):
     if args.force:
         report_path.unlink(missing_ok=True)
 
-    mean, std = _dataset_normalization(args.dataset)
-    if args.input_mean is not None:
-        mean = args.input_mean
-    if args.input_std is not None:
-        std = args.input_std
     params = {
         "model_path": model_path.resolve(),
         "input_topic": args.input_topic,
         "output_topic": args.output_topic,
+        "preprocessing_manifest": model_path.with_suffix(".preprocess.json").resolve(),
+        "output_normalization": args.output_normalization,
         "results_dir": args.results_dir.resolve(),
         "dataset": args.dataset,
         "synthetic_input": args.emulate_camera,
@@ -814,9 +921,6 @@ def _run_model(model_path, model_name, args):
         "iterations": args.iterations,
         "startup_drop_frames": args.startup_drop_frames,
         "ready_topic": args.ready_topic,
-        "input_scale": args.input_scale,
-        "input_mean": mean,
-        "input_std": std,
         "deadline_ms": args.deadline_ms,
         "cpu_affinity": args.cpu_affinity if args.cpu_affinity is not None else -1,
         "onnx_num_threads": args.onnx_num_threads,
@@ -974,6 +1078,12 @@ def parser():
     ap.add_argument("--input-scale", type=float, default=1.0 / 255.0)
     ap.add_argument("--input-mean", type=float, nargs="+")
     ap.add_argument("--input-std", type=float, nargs="+")
+    ap.add_argument(
+        "--output-normalization",
+        choices=("none", "l2"),
+        default="none",
+        help="Transform model output before publishing (default: preserve raw model output)",
+    )
     ap.add_argument("--model-timeout", type=float, default=120)
     ap.add_argument("--force", action="store_true", help="Re-export and benchmark existing results")
     return ap
@@ -1009,6 +1119,8 @@ def main(args=None):
         ap.error("GPU utilization and memory limits must be finite percentages from 0 to 100")
     if (args.input_mean is None) != (args.input_std is None):
         ap.error("--input-mean and --input-std must be given together")
+    if not math.isfinite(args.input_scale):
+        ap.error("--input-scale must be finite")
 
     try:
         models, hf_hub_download = discover_models(args.dataset, args.model)
@@ -1025,11 +1137,28 @@ def main(args=None):
         name = model["nn"]
         print(f"\n[{index}/{len(models)}] {name}", flush=True)
         model_path = args.onnx_dir / args.dataset / f"{name}.onnx"
+        manifest_path = model_path.with_suffix(".preprocess.json")
         if args.force:
             model_path.unlink(missing_ok=True)
+            manifest_path.unlink(missing_ok=True)
         try:
+            preprocessing_manifest = _build_preprocessing_manifest(
+                model,
+                input_scale=args.input_scale,
+                input_mean=args.input_mean,
+                input_std=args.input_std,
+            )
             if not model_path.exists():
                 export_model(model, model_path, hf_hub_download)
+            temporary_manifest_path = manifest_path.with_suffix(
+                manifest_path.suffix + ".tmp"
+            )
+            manifest_path.parent.mkdir(parents=True, exist_ok=True)
+            temporary_manifest_path.write_text(
+                json.dumps(preprocessing_manifest, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            temporary_manifest_path.replace(manifest_path)
             if args.export_only:
                 completed += 1
                 print(f"[EXPORTED] {model_path}")

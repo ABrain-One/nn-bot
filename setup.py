@@ -11,7 +11,7 @@ setup(
         ("share/ament_index/resource_index/packages", ["resource/" + package_name]),
         ("share/" + package_name, ["package.xml"]),
     ],
-    install_requires=["setuptools", "numpy<2"],
+    install_requires=["setuptools", "numpy<2", "Pillow>=9.1"],
     extras_require={
         "cpu": ["onnxruntime>=1.17"],
         "gpu": ["onnxruntime-gpu[cuda,cudnn]>=1.21"],

@@ -26,9 +26,10 @@ from ab.bot.runtime import (
     dropped_frames_between,
     get_cpu_affinity,
     header_to_publish_latency_ns,
-    l2_normalize,
+    load_preprocessing_manifest,
     message_stamp_ns,
     preprocess_image,
+    process_model_output,
     sample_cpu_frequencies,
     sample_temperatures,
     set_cpu_affinity,
@@ -43,6 +44,8 @@ class InferenceNode(Node):
         self.declare_parameter("input_topic", "/camera/image_raw")
         self.declare_parameter("camera_data_timeout", 90.0)
         self.declare_parameter("output_topic", "/nn_bot/output")
+        self.declare_parameter("preprocessing_manifest", "")
+        self.declare_parameter("output_normalization", "none")
         self.declare_parameter("results_dir", "stats")
         self.declare_parameter("dataset", "custom")
         self.declare_parameter("synthetic_input", False)
@@ -74,6 +77,38 @@ class InferenceNode(Node):
         model_path = Path(self.get_parameter("model_path").value).expanduser()
         if not model_path.is_file():
             raise FileNotFoundError(f"ONNX model not found: {model_path}")
+        configured_manifest_path = str(
+            self.get_parameter("preprocessing_manifest").value
+        ).strip()
+        if configured_manifest_path:
+            manifest_path = Path(configured_manifest_path).expanduser()
+            if not manifest_path.is_file():
+                raise FileNotFoundError(
+                    f"Preprocessing manifest not found: {manifest_path}"
+                )
+        else:
+            manifest_path = model_path.with_suffix(".preprocess.json")
+        self.preprocessing_manifest = (
+            load_preprocessing_manifest(manifest_path)
+            if manifest_path.is_file()
+            else None
+        )
+        self.preprocessing_manifest_path = (
+            manifest_path if self.preprocessing_manifest is not None else None
+        )
+        if (
+            self.preprocessing_manifest is not None
+            and self.preprocessing_manifest.get("model") not in (None, model_path.stem)
+        ):
+            raise ValueError(
+                f"Preprocessing manifest model {self.preprocessing_manifest['model']!r} "
+                f"does not match ONNX model {model_path.stem!r}"
+            )
+        self.output_normalization = str(
+            self.get_parameter("output_normalization").value
+        )
+        if self.output_normalization not in {"none", "l2"}:
+            raise ValueError("output_normalization must be 'none' or 'l2'")
         self.synthetic_input = bool(self.get_parameter("synthetic_input").value)
         self.camera_rate_hz = float(self.get_parameter("camera_rate_hz").value)
         self.camera_data_timeout = float(
@@ -116,6 +151,12 @@ class InferenceNode(Node):
         self.input_scale = float(self.get_parameter("input_scale").value)
         self.input_mean = list(self.get_parameter("input_mean").value)
         self.input_std = list(self.get_parameter("input_std").value)
+        if self.preprocessing_manifest is not None:
+            preprocess_image(
+                np.zeros((1, 1, 3), dtype=np.uint8),
+                self.model_input.shape,
+                operations=self.preprocessing_manifest["operations"],
+            )
         self.warmup_runs = max(0, int(self.get_parameter("warmup_runs").value))
         self.iterations = int(self.get_parameter("iterations").value)
         if self.iterations < 1:
@@ -223,9 +264,14 @@ class InferenceNode(Node):
                 self.input_scale,
                 self.input_mean,
                 self.input_std,
+                operations=(
+                    self.preprocessing_manifest["operations"]
+                    if self.preprocessing_manifest is not None
+                    else None
+                ),
             )
             outputs = self.session.run(None, {self.model_input.name: model_tensor})
-            output = l2_normalize(outputs[0])
+            output = process_model_output(outputs[0], self.output_normalization)
 
             message_out = Float32MultiArray()
             message_out.layout.dim = [
@@ -306,6 +352,7 @@ class InferenceNode(Node):
             "architecture": platform.machine(),
             "os_version": platform.platform(),
             "valid": self.failed_frames == 0 and self.clock_inconsistency_frames == 0,
+            "profile_version": 2,
             "emulator": False,
             "synthetic_input": self.synthetic_input,
             "input_source": "synthetic_camera" if self.synthetic_input else "sensor_topic",
@@ -342,10 +389,26 @@ class InferenceNode(Node):
             "runtime": "ONNX Runtime",
             "onnxruntime_provider": self.session.get_providers()[0],
             "model_format": "onnx",
-            "input_topic": str(self.get_parameter("input_topic").value),
-            "inference_time_scope": (
-                "image_preprocessing_through_l2_normalization_and_output_publish"
+            "output_normalization": self.output_normalization,
+            "preprocessing_manifest": (
+                str(self.preprocessing_manifest_path)
+                if self.preprocessing_manifest is not None
+                else None
             ),
+            "preprocessing": (
+                self.preprocessing_manifest
+                if self.preprocessing_manifest is not None
+                else {
+                    "source": "ros_parameters",
+                    "resize": "legacy_nearest",
+                    "color_order": "RGB",
+                    "scale": self.input_scale,
+                    "mean": self.input_mean,
+                    "std": self.input_std,
+                }
+            ),
+            "input_topic": str(self.get_parameter("input_topic").value),
+            "inference_time_scope": "image_preprocessing_through_output_publish",
             "model_size_bytes": self.model_path.stat().st_size,
             "input_shape": input_shape,
             "output_shape": output_shape,

@@ -1,15 +1,18 @@
 """Model-input preparation and benchmark statistics independent of ROS 2."""
 
+import json
+import math
 import os
+import platform
 import shutil
 import subprocess
-import platform
 from pathlib import Path
 
 import numpy as np
 
 
 CAMERA_DATA_TIMEOUT_EXIT_CODE = 75
+PREPROCESSING_MANIFEST_VERSION = 1
 
 
 def _input_layout(shape):
@@ -22,8 +25,191 @@ def _input_layout(shape):
     raise ValueError(f"Cannot infer image channel layout from model input shape {shape}")
 
 
-def preprocess_image(image, model_shape, scale=1.0 / 255.0, mean=None, std=None):
-    """Resize an RGB image and return a normalized float32 tensor for a rank-4 ONNX input."""
+def load_preprocessing_manifest(path):
+    """Load and validate a model-specific preprocessing manifest."""
+    path = Path(path)
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"Could not read preprocessing manifest {path}: {error}") from error
+    if not isinstance(manifest, dict) or manifest.get("version") != PREPROCESSING_MANIFEST_VERSION:
+        raise ValueError(
+            f"Unsupported preprocessing manifest version in {path}; "
+            f"expected {PREPROCESSING_MANIFEST_VERSION}"
+        )
+    operations = manifest.get("operations")
+    if not isinstance(operations, list):
+        raise ValueError(f"Preprocessing manifest {path} must contain an operations list")
+    supported_operations = {"resize", "center_crop", "grayscale", "to_tensor", "normalize"}
+    if not operations:
+        raise ValueError(f"Preprocessing manifest {path} must not have an empty operations list")
+    seen_to_tensor = False
+    for index, operation in enumerate(operations):
+        if not isinstance(operation, dict) or operation.get("type") not in supported_operations:
+            raise ValueError(f"Unsupported preprocessing operation at index {index} in {path}")
+        operation_type = operation["type"]
+        if operation_type in {"resize", "center_crop"}:
+            size = operation.get("size")
+            valid_size = (
+                isinstance(size, int) and size > 0
+            ) or (
+                isinstance(size, list)
+                and len(size) == 2
+                and all(isinstance(dimension, int) and dimension > 0 for dimension in size)
+            )
+            if not valid_size:
+                raise ValueError(f"Invalid {operation_type} size at index {index} in {path}")
+            if operation_type == "resize":
+                if operation.get("mode") not in {"shorter", "exact"}:
+                    raise ValueError(f"Invalid resize mode at index {index} in {path}")
+                if operation.get("interpolation", "bilinear") not in {
+                    "nearest", "bilinear", "bicubic", "lanczos"
+                }:
+                    raise ValueError(f"Invalid resize interpolation at index {index} in {path}")
+        elif operation_type == "to_tensor":
+            if seen_to_tensor:
+                raise ValueError(f"Manifest {path} has multiple to_tensor operations")
+            scale = operation.get("scale", 1.0 / 255.0)
+            if not isinstance(scale, (int, float)) or not math.isfinite(scale):
+                raise ValueError(f"Invalid tensor scale at index {index} in {path}")
+            seen_to_tensor = True
+        elif operation_type == "normalize":
+            mean = operation.get("mean")
+            std = operation.get("std")
+            if (
+                not seen_to_tensor
+                or not isinstance(mean, list)
+                or not isinstance(std, list)
+                or not mean
+                or len(mean) != len(std)
+                or any(not isinstance(value, (int, float)) or not math.isfinite(value) for value in mean + std)
+                or any(value == 0 for value in std)
+            ):
+                raise ValueError(f"Invalid normalization at index {index} in {path}")
+    if not seen_to_tensor:
+        raise ValueError(f"Preprocessing manifest {path} must contain a to_tensor operation")
+    return manifest
+
+
+def _preprocess_with_manifest(image, model_shape, operations):
+    from PIL import Image, ImageOps
+
+    layout, channels = _input_layout(model_shape)
+    if image.ndim != 3 or image.shape[2] not in (3, 4):
+        raise ValueError(f"Expected an RGB/RGBA image, got shape {image.shape}")
+    pil_image = Image.fromarray(image[..., :3].astype(np.uint8, copy=False))
+    tensor = None
+
+    for operation in operations:
+        operation_type = operation["type"]
+        if operation_type == "grayscale":
+            if tensor is not None:
+                raise ValueError("grayscale must appear before to_tensor in the manifest")
+            pil_image = pil_image.convert("L")
+        elif operation_type == "resize":
+            if tensor is not None:
+                raise ValueError("resize must appear before to_tensor in the manifest")
+            size = operation.get("size")
+            interpolation = operation.get("interpolation", "bilinear").lower()
+            resampling = {
+                "nearest": Image.Resampling.NEAREST,
+                "bilinear": Image.Resampling.BILINEAR,
+                "bicubic": Image.Resampling.BICUBIC,
+                "lanczos": Image.Resampling.LANCZOS,
+            }.get(interpolation)
+            if resampling is None:
+                raise ValueError(f"Unsupported resize interpolation {interpolation!r}")
+            if isinstance(size, int) and operation.get("mode") == "shorter":
+                width, height = pil_image.size
+                if width <= height:
+                    output_size = (size, int(size * height / width))
+                else:
+                    output_size = (int(size * width / height), size)
+            elif isinstance(size, int):
+                output_size = (size, size)
+            elif isinstance(size, list) and len(size) == 2:
+                output_size = (int(size[1]), int(size[0]))
+            else:
+                raise ValueError(f"Invalid resize size in manifest: {size!r}")
+            pil_image = pil_image.resize(output_size, resample=resampling)
+        elif operation_type == "center_crop":
+            if tensor is not None:
+                raise ValueError("center_crop must appear before to_tensor in the manifest")
+            size = operation.get("size")
+            if isinstance(size, int):
+                crop_height = crop_width = size
+            elif isinstance(size, list) and len(size) == 2:
+                crop_height, crop_width = map(int, size)
+            else:
+                raise ValueError(f"Invalid center-crop size in manifest: {size!r}")
+            width, height = pil_image.size
+            pad_width = max(crop_width - width, 0)
+            pad_height = max(crop_height - height, 0)
+            if pad_width or pad_height:
+                left_pad = pad_width // 2
+                top_pad = pad_height // 2
+                pil_image = ImageOps.expand(
+                    pil_image,
+                    border=(
+                        left_pad,
+                        top_pad,
+                        pad_width - left_pad,
+                        pad_height - top_pad,
+                    ),
+                    fill=0,
+                )
+                width, height = pil_image.size
+            left = int(round((width - crop_width) / 2.0))
+            top = int(round((height - crop_height) / 2.0))
+            pil_image = pil_image.crop((left, top, left + crop_width, top + crop_height))
+        elif operation_type == "to_tensor":
+            if tensor is not None:
+                raise ValueError("Manifest contains more than one to_tensor operation")
+            scale = float(operation.get("scale", 1.0 / 255.0))
+            if not math.isfinite(scale):
+                raise ValueError("Manifest tensor scale must be finite")
+            pixels = np.asarray(pil_image)
+            if pixels.ndim == 2:
+                pixels = pixels[..., None]
+            tensor = pixels.astype(np.float32) * scale
+        elif operation_type == "normalize":
+            if tensor is None:
+                raise ValueError("normalize must appear after to_tensor in the manifest")
+            mean = np.asarray(operation.get("mean"), dtype=np.float32)
+            std = np.asarray(operation.get("std"), dtype=np.float32)
+            if mean.ndim != 1 or std.ndim != 1 or len(mean) != channels or len(std) != channels:
+                raise ValueError(f"Manifest normalization must define {channels} channels")
+            if not np.isfinite(mean).all() or not np.isfinite(std).all() or np.any(std == 0):
+                raise ValueError("Manifest normalization values must be finite with non-zero std")
+            tensor = (tensor - mean.reshape(1, 1, channels)) / std.reshape(1, 1, channels)
+
+    if tensor is None:
+        raise ValueError("Preprocessing manifest must include a to_tensor operation")
+    if tensor.shape[-1] != channels:
+        raise ValueError(
+            f"Preprocessed image has {tensor.shape[-1]} channels but model expects {channels}"
+        )
+    if layout == "NCHW":
+        tensor = np.transpose(tensor, (2, 0, 1))
+    result = np.expand_dims(tensor, axis=0).astype(np.float32, copy=False)
+    expected_shape = tuple(
+        int(size) if isinstance(size, (int, np.integer)) else result.shape[index]
+        for index, size in enumerate(model_shape)
+    )
+    if result.shape != expected_shape:
+        raise ValueError(
+            f"Preprocessed tensor shape {result.shape} does not match model input {expected_shape}"
+        )
+    return result
+
+
+def preprocess_image(
+    image, model_shape, scale=1.0 / 255.0, mean=None, std=None, operations=None
+):
+    """Prepare an image using a manifest or the legacy nearest-resize parameters."""
+    if operations is not None:
+        return _preprocess_with_manifest(image, model_shape, operations)
+
     if image.ndim != 3 or image.shape[2] not in (3, 4):
         raise ValueError(f"Expected an RGB/RGBA image, got shape {image.shape}")
 
@@ -71,6 +257,15 @@ def l2_normalize(output):
     if norm == 0:
         return output
     return output / norm
+
+
+def process_model_output(output, normalization="none"):
+    """Apply the explicitly selected output transform without changing raw outputs."""
+    if normalization == "none":
+        return np.asarray(output, dtype=np.float32)
+    if normalization == "l2":
+        return l2_normalize(output)
+    raise ValueError(f"Unsupported output normalization {normalization!r}")
 
 
 def timing_stats(samples_ns, deadline_ns=None):

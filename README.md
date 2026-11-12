@@ -89,10 +89,18 @@ The output is a `std_msgs/Float32MultiArray` containing the first model output.
 Ten incoming frames are used for warm-up by default; the next 500 frames are timed
 (configurable with `iterations`, recommended 500–1000 frames).
 Set `warmup_runs`, `iterations`, `deadline_ms`, `cpu_affinity`, `onnx_num_threads`,
-`input_scale`, `input_mean`, and `input_std`
-as ROS parameters to match the model's preprocessing and execution constraints.
-The default preprocessing resizes with nearest-neighbor sampling, converts RGB
-pixels to float32 in `[0, 1]`, and supports NCHW or NHWC input layouts.
+`input_scale`, `input_mean`, and `input_std` as ROS parameters for models without
+a preprocessing manifest. If `<model>.preprocess.json` sits beside the ONNX file,
+the node loads it automatically; use `preprocessing_manifest` to specify another
+path. A manifest takes precedence over the scalar preprocessing parameters.
+Without a manifest, the legacy preprocessing resizes with nearest-neighbor
+sampling, converts RGB pixels to float32 in `[0, 1]`, and supports NCHW or NHWC
+input layouts.
+
+The published output is the raw first model output by default. Set
+`-p output_normalization:=l2` only when downstream consumers require L2-normalized
+values. Benchmark records identify the selected output normalization and the
+preprocessing manifest or legacy parameters used.
 
 Results are written to
 `stats/<model>/robot_<dataset>_<hostname>.json` by default. Select an execution
@@ -101,8 +109,8 @@ provider with the `providers` parameter, for example
 by the installed ONNX Runtime build.
 
 The standalone ONNX node's primary `latency_ns` measures image conversion and
-preprocessing through ONNX inference, L2-normalization of its output, and
-publishing that output. Every timing summary includes `avg`, `median`, `p95`,
+preprocessing through ONNX inference and publishing that output, including any
+optional output normalization. Every timing summary includes `avg`, `median`, `p95`,
 `p99`, `min`, `max`, `std`, and individual `samples`. Standard deviation uses
 population standard deviation (dividing by N, `ddof=0`), matching nn-lite's
 convention. `deadline_missed_frames` reports how many frames exceeded the
@@ -177,6 +185,32 @@ provider as a stable reference; the ROS ONNX measurement prefers CUDA when
 available and records its active provider. Finite-value and top-class agreement
 are recorded. Every timing summary keeps its individual samples and includes
 mean, median, p95, p99, and max.
+
+The pipeline writes a `<model>.preprocess.json` sidecar beside each ONNX export
+and passes it to the ROS node. Supported deterministic torchvision operations
+are translated to the manifest; random horizontal-flip augmentation is omitted
+for inference. Unsupported transforms fail with an explicit error rather than
+silently using different preprocessing. `--input-scale`, `--input-mean`, and
+`--input-std` customize the generated manifest. For custom ONNX models, provide
+an equivalent sidecar or use the legacy ROS preprocessing parameters. A
+manifest's `operations` run in order; supported operations are `resize`
+(`shorter` or `exact`), `center_crop`, `grayscale`, `to_tensor`, and `normalize`.
+For example:
+
+```json
+{
+  "version": 1,
+  "operations": [
+    {"type": "resize", "size": 128, "mode": "shorter", "interpolation": "bilinear"},
+    {"type": "center_crop", "size": 128},
+    {"type": "to_tensor", "scale": 0.00392156862745098},
+    {"type": "normalize", "mean": [0.4914, 0.4822, 0.4465], "std": [0.247, 0.2435, 0.2616]}
+  ]
+}
+```
+
+Model outputs are published raw by default. Use `--output-normalization l2` to
+retain L2 normalization for consumers that depend on the previous behavior.
 
 Before profiling each model, the pipeline samples NVIDIA GPU utilization and
 memory use. It warns by default when utilization or memory use exceeds 20%;

@@ -1,16 +1,21 @@
 import unittest
 import json
 import csv
+import importlib
 from pathlib import Path
 import sys
 from types import SimpleNamespace
 from tempfile import TemporaryDirectory
 import socket
 
+import numpy as np
+
 from ab.bot.dataset_pipeline import (
+	_build_preprocessing_manifest,
 	_camera_emulator_command,
 	_inference_command,
 	_inference_failure_message,
+	_has_complete_record,
 	_merge_profile,
 	_replace_adaptive_avg_pools,
 	_write_nn_stat_exports,
@@ -18,6 +23,7 @@ from ab.bot.dataset_pipeline import (
 	infer_shapes,
 	parser,
 )
+from ab.bot.runtime import preprocess_image
 
 
 class DatasetPipelineTests(unittest.TestCase):
@@ -42,12 +48,82 @@ class DatasetPipelineTests(unittest.TestCase):
 		self.assertIsNone(args.cpu_affinity)
 		self.assertEqual(args.onnx_num_threads, 1)
 		self.assertEqual(args.camera_data_timeout, 90.0)
+		self.assertEqual(args.output_normalization, "none")
+		self.assertEqual(
+			parser().parse_args(
+				["--model", "AirNet", "--output-normalization", "l2"]
+			).output_normalization,
+			"l2",
+		)
 		self.assertEqual(
 			parser().parse_args(
 				["--model", "AirNet", "--camera-data-timeout", "45"]
 			).camera_data_timeout,
 			45.0,
 		)
+
+	def test_preprocessing_manifest_matches_nn_dataset_norm_transform(self):
+		try:
+			from PIL import Image
+			transform_module = importlib.import_module("ab.nn.transform.norm_128")
+		except (ImportError, RuntimeError) as error:
+			self.skipTest(str(error))
+
+		model = {
+			"nn": "TestNet",
+			"dataset": "cifar-10",
+			"prm": {"transform": "norm_128"},
+		}
+		manifest = _build_preprocessing_manifest(model)
+		image = np.random.default_rng(42).integers(0, 256, (40, 60, 3), dtype=np.uint8)
+		reference = transform_module.transform(
+			(
+				(0.4914, 0.4822, 0.4465),
+				(0.2470, 0.2435, 0.2616),
+			)
+		)(Image.fromarray(image)).numpy()[None, ...]
+
+		actual = preprocess_image(
+			image,
+			(1, 3, 128, 128),
+			operations=manifest["operations"],
+		)
+
+		np.testing.assert_allclose(actual, reference, rtol=0, atol=1e-6)
+
+	def test_complete_record_matches_preprocessing_and_output_contract(self):
+		with TemporaryDirectory() as directory:
+			root = Path(directory)
+			args = SimpleNamespace(
+				results_dir=root / "stats",
+				dataset="cifar-10",
+				onnx_dir=root / "onnx",
+				output_normalization="none",
+			)
+			manifest = {
+				"version": 1,
+				"transform": "norm_128",
+				"operations": [{"type": "to_tensor", "scale": 1 / 255}],
+			}
+			manifest_path = args.onnx_dir / args.dataset / "AirNet.preprocess.json"
+			manifest_path.parent.mkdir(parents=True)
+			manifest_path.write_text(json.dumps(manifest))
+			report_path = (
+				args.results_dir / "AirNet"
+				/ f"robot_{args.dataset}_{socket.gethostname()}.json"
+			)
+			report_path.parent.mkdir(parents=True)
+			report_path.write_text(json.dumps({
+				"valid": True,
+				"dataset": args.dataset,
+				"profile_version": 2,
+				"preprocessing": manifest,
+				"output_normalization": "none",
+			}))
+
+			self.assertTrue(_has_complete_record("AirNet", args))
+			args.output_normalization = "l2"
+			self.assertFalse(_has_complete_record("AirNet", args))
 
 	def test_cli_supports_export_only(self):
 		self.assertTrue(parser().parse_args(["--model", "AirNet", "--export-only"]).export_only)
