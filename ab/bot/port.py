@@ -28,6 +28,7 @@ from ab.bot.runtime import (
     header_to_publish_latency_ns,
     load_preprocessing_manifest,
     message_stamp_ns,
+    measurement_condition_warnings,
     preprocess_image,
     process_model_output,
     sample_cpu_frequencies,
@@ -171,8 +172,10 @@ class InferenceNode(Node):
         self.startup_frames_dropped = 0
         self.ready = False
         self.latencies_ns = []
+        self.onnxruntime_latencies_ns = []
         self.end_to_end_latencies_ns = []
         self.callback_latencies_ns = []
+        self.source_to_callback_latencies_ns = []
         self.end_to_end_timestamp_frames = 0
         self.clock_inconsistency_frames = 0
         self.clock_error_message = None
@@ -270,7 +273,9 @@ class InferenceNode(Node):
                     else None
                 ),
             )
+            inference_started_ns = time.perf_counter_ns()
             outputs = self.session.run(None, {self.model_input.name: model_tensor})
+            inference_elapsed_ns = time.perf_counter_ns() - inference_started_ns
             output = process_model_output(outputs[0], self.output_normalization)
 
             message_out = Float32MultiArray()
@@ -311,9 +316,13 @@ class InferenceNode(Node):
 
             if len(self.latencies_ns) < self.iterations:
                 self.latencies_ns.append(elapsed_ns)
+                self.onnxruntime_latencies_ns.append(inference_elapsed_ns)
                 self.callback_latencies_ns.append(callback_elapsed_ns)
                 if header_latency_ns is not None:
                     self.end_to_end_latencies_ns.append(header_latency_ns)
+                    self.source_to_callback_latencies_ns.append(
+                        arrival_ros_ns - source_stamp_ns
+                    )
                     self.end_to_end_timestamp_frames += 1
                 if len(self.latencies_ns) == self.iterations and not self.record_saved:
                     self.save_record(list(model_tensor.shape), list(output.shape))
@@ -344,6 +353,31 @@ class InferenceNode(Node):
         deadline_ms = float(self.get_parameter("deadline_ms").value)
         deadline_ns = int(round(deadline_ms * 1_000_000))
         deadline_missed_frames = int(sum(1 for lat in self.latencies_ns if lat > deadline_ns))
+        cpu_frequencies = sample_cpu_frequencies()
+        temperatures = sample_temperatures()
+        condition_warnings = measurement_condition_warnings(
+            cpu_frequencies, temperatures
+        )
+        dropped_frames = self.dropped_frames if self.synthetic_input else None
+        validity_errors = []
+        if self.failed_frames:
+            validity_errors.append(
+                f"{self.failed_frames} image frame(s) failed: {self.last_frame_error}"
+            )
+        if self.clock_inconsistency_frames:
+            validity_errors.append(
+                f"{self.clock_inconsistency_frames} image frame(s) had inconsistent ROS clocks: "
+                f"{self.clock_error_message}"
+            )
+        if len(self.latencies_ns) != self.iterations:
+            validity_errors.append(
+                f"collected {len(self.latencies_ns)} of {self.iterations} requested inference samples"
+            )
+        if dropped_frames:
+            validity_errors.append(f"{dropped_frames} synthetic camera frame(s) were dropped")
+        validity_errors.extend(condition_warnings)
+        valid = not validity_errors
+        active_providers = self.session.get_providers()
         record = {
             "model_name": self.model_path.stem,
             "dataset": str(self.get_parameter("dataset").value),
@@ -351,8 +385,8 @@ class InferenceNode(Node):
             "board": device_type,
             "architecture": platform.machine(),
             "os_version": platform.platform(),
-            "valid": self.failed_frames == 0 and self.clock_inconsistency_frames == 0,
-            "profile_version": 2,
+            "valid": valid,
+            "profile_version": 3,
             "emulator": False,
             "synthetic_input": self.synthetic_input,
             "input_source": "synthetic_camera" if self.synthetic_input else "sensor_topic",
@@ -370,9 +404,9 @@ class InferenceNode(Node):
             "failed_frames": self.failed_frames,
             "clock_inconsistency_frames": self.clock_inconsistency_frames,
             "clock_error_message": self.clock_error_message,
-            "dropped_frames": self.dropped_frames if self.synthetic_input else None,
+            "dropped_frames": dropped_frames,
             "last_frame_error": self.last_frame_error,
-            "error_message": self.last_frame_error or self.clock_error_message,
+            "error_message": "; ".join(validity_errors) or None,
             "duration": int(round(float(np.mean(self.latencies_ns)))),
             "deadline_ms": deadline_ms,
             "deadline_missed_frames": deadline_missed_frames,
@@ -387,7 +421,15 @@ class InferenceNode(Node):
             "npu_error": None,
             "unit": device_type,
             "runtime": "ONNX Runtime",
-            "onnxruntime_provider": self.session.get_providers()[0],
+            "onnxruntime_provider": (
+                active_providers[0]
+                if len(active_providers) == 1
+                else None
+            ),
+            "onnxruntime_active_providers": active_providers,
+            "onnxruntime_provider_status": (
+                "active session providers; per-node execution provider not measured"
+            ),
             "model_format": "onnx",
             "output_normalization": self.output_normalization,
             "preprocessing_manifest": (
@@ -409,10 +451,12 @@ class InferenceNode(Node):
             ),
             "input_topic": str(self.get_parameter("input_topic").value),
             "inference_time_scope": "image_preprocessing_through_output_publish",
+            "onnxruntime_inference_time_scope": "session_run_only",
             "model_size_bytes": self.model_path.stat().st_size,
             "input_shape": input_shape,
             "output_shape": output_shape,
             "latency_ns": timing_stats(self.latencies_ns, deadline_ns=deadline_ns),
+            "onnxruntime_latency_ns": timing_stats(self.onnxruntime_latencies_ns),
             "end_to_end_latency_ns": (
                 timing_stats(self.end_to_end_latencies_ns)
                 if self.end_to_end_latencies_ns
@@ -422,6 +466,13 @@ class InferenceNode(Node):
             "end_to_end_header_timestamp_frames": self.end_to_end_timestamp_frames,
             "callback_latency_ns": timing_stats(self.callback_latencies_ns),
             "callback_latency_scope": "callback_entry_to_output_publish",
+            "source_to_callback_latency_ns": (
+                timing_stats(self.source_to_callback_latencies_ns)
+                if self.source_to_callback_latencies_ns
+                else None
+            ),
+            "source_to_callback_latency_scope": "image_header_stamp_to_callback_entry",
+            "measurement_condition_warnings": condition_warnings,
             "in_dim_0": input_batch,
             "in_dim_1": input_height,
             "in_dim_2": input_width,
@@ -432,8 +483,8 @@ class InferenceNode(Node):
                 "ros_distro": os.environ.get("ROS_DISTRO", "unknown"),
                 "cpu_cores": os.cpu_count(),
                 "cpu_affinity": get_cpu_affinity(),
-                "cpu_frequencies": sample_cpu_frequencies(),
-                "temperatures": sample_temperatures(),
+                "cpu_frequencies": cpu_frequencies,
+                "temperatures": temperatures,
                 "onnxruntime_version": ort.__version__,
                 "onnx_num_threads": int(self.get_parameter("onnx_num_threads").value) or None,
                 "providers": self.session.get_providers(),

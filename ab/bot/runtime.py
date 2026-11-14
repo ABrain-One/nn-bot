@@ -371,7 +371,15 @@ def sample_cpu_frequencies():
 
         freq = psutil.cpu_freq()
         if freq:
-            info["cur_freq_mhz"] = freq.current
+            current = freq.current
+            if (
+                isinstance(current, (int, float))
+                and isinstance(freq.max, (int, float))
+                and freq.max >= 1000
+                and 0 < current < 100
+            ):
+                current *= 1000
+            info["cur_freq_mhz"] = current
             info["min_freq_mhz"] = freq.min
             info["max_freq_mhz"] = freq.max
     except Exception:
@@ -384,6 +392,33 @@ def sample_cpu_frequencies():
     except OSError:
         pass
     return info or None
+
+
+def measurement_condition_warnings(cpu_frequencies, temperatures):
+    """Report CPU conditions that make inference timings difficult to compare."""
+    warnings = []
+    governor = (cpu_frequencies or {}).get("scaling_governor")
+    if governor == "powersave":
+        warnings.append("CPU scaling governor is powersave")
+
+    current = (cpu_frequencies or {}).get("cur_freq_mhz")
+    maximum = (cpu_frequencies or {}).get("max_freq_mhz")
+    if (
+        isinstance(current, (int, float))
+        and isinstance(maximum, (int, float))
+        and maximum > 0
+        and current / maximum < 0.6
+    ):
+        warnings.append("CPU clock is below 60% of its reported maximum")
+
+    for sensor, entries in (temperatures or {}).items():
+        for entry in entries:
+            current_c = entry.get("current_c")
+            if isinstance(current_c, (int, float)) and current_c >= 85:
+                warnings.append(
+                    f"{entry.get('label') or sensor} temperature is at least 85 C"
+                )
+    return warnings
 
 
 def set_cpu_affinity(cpus):

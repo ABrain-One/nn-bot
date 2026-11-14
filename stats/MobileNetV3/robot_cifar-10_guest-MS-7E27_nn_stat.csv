@@ -1,2 +1,0 @@
-task,dataset,epoch,metric,accuracy,duration,nn,accuracy_source,duration_unit,duration_source
-img-classification,cifar-10,50,acc,0.8864,0.008413025,MobileNetV3,checkpoint_training_accuracy,seconds_per_inference,image_preprocessing_through_l2_normalization_and_output_publish

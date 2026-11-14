@@ -5,7 +5,7 @@
   "board": "Micro-Star International Co., Ltd. MS-7E27",
   "architecture": "x86_64",
   "os_version": "Linux-6.8.0-138-generic-x86_64-with-glibc2.35",
-  "valid": true,
+  "valid": false,
   "emulator": false,
   "synthetic_input": true,
   "input_source": "synthetic_camera",
@@ -21,7 +21,7 @@
   "clock_error_message": null,
   "dropped_frames": 515,
   "last_frame_error": null,
-  "error_message": null,
+  "error_message": "Legacy measurement invalidated: 515 synthetic camera frames were dropped, observed input rate was 19.10 Hz for a 30 Hz request, GPU preflight observed 100% utilization, PyTorch CUDA was unavailable, and CPU telemetry reported powersave, approximately 2.25 GHz current versus 5.05 GHz maximum, and 87.875 C. ONNX session.run() timing was not recorded.",
   "duration": 8413025,
   "deadline_ms": 33.0,
   "deadline_missed_frames": 0,
@@ -36,7 +36,12 @@
   "npu_error": null,
   "unit": "Micro-Star International Co., Ltd. MS-7E27",
   "runtime": "PyTorch and ONNX Runtime",
-  "onnxruntime_provider": "CUDAExecutionProvider",
+  "onnxruntime_provider": null,
+  "onnxruntime_active_providers": [
+    "CUDAExecutionProvider",
+    "CPUExecutionProvider"
+  ],
+  "onnxruntime_provider_status": "Legacy record lists active session providers only; per-node execution provider was not measured",
   "model_format": "onnx",
   "input_topic": "/camera/image_raw",
   "inference_time_scope": "image_preprocessing_through_l2_normalization_and_output_publish",
@@ -2608,17 +2613,5 @@
   },
   "pytorch_duration": 5312292,
   "pytorch_unit": "CPU",
-  "pytorch_inference_time_scope": "pytorch_cpu_forward_only",
-  "nn_stat": {
-    "task": "img-classification",
-    "dataset": "cifar-10",
-    "epoch": 50,
-    "metric": "acc",
-    "accuracy": 0.8864,
-    "duration": 0.008413025,
-    "nn": "MobileNetV3",
-    "accuracy_source": "checkpoint_training_accuracy",
-    "duration_unit": "seconds_per_inference",
-    "duration_source": "image_preprocessing_through_l2_normalization_and_output_publish"
-  }
+  "pytorch_inference_time_scope": "pytorch_cpu_forward_only"
 }

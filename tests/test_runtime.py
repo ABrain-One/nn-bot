@@ -12,6 +12,7 @@ from ab.bot.runtime import (
     l2_normalize,
     load_preprocessing_manifest,
     message_stamp_ns,
+    measurement_condition_warnings,
     preprocess_image,
     process_model_output,
     sample_cpu_frequencies,
@@ -23,6 +24,25 @@ from ab.bot.runtime import (
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_measurement_conditions_flag_powersave_low_clock_and_high_temperature(self):
+        warnings = measurement_condition_warnings(
+            {
+                "scaling_governor": "powersave",
+                "cur_freq_mhz": 2250,
+                "max_freq_mhz": 5050,
+            },
+            {"coretemp": [{"label": "Tctl", "current_c": 87.9}]},
+        )
+
+        self.assertEqual(
+            warnings,
+            [
+                "CPU scaling governor is powersave",
+                "CPU clock is below 60% of its reported maximum",
+                "Tctl temperature is at least 85 C",
+            ],
+        )
+
     def test_preprocesses_nchw_input_and_resizes(self):
         image = np.full((4, 6, 3), 255, dtype=np.uint8)
 

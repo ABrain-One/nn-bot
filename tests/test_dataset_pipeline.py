@@ -116,12 +116,19 @@ class DatasetPipelineTests(unittest.TestCase):
 			report_path.write_text(json.dumps({
 				"valid": True,
 				"dataset": args.dataset,
-				"profile_version": 2,
+				"profile_version": 3,
+				"onnxruntime_latency_ns": {"avg": 123.0},
 				"preprocessing": manifest,
 				"output_normalization": "none",
 			}))
 
 			self.assertTrue(_has_complete_record("AirNet", args))
+			record = json.loads(report_path.read_text())
+			record.pop("onnxruntime_latency_ns")
+			report_path.write_text(json.dumps(record))
+			self.assertFalse(_has_complete_record("AirNet", args))
+			record["onnxruntime_latency_ns"] = {"avg": 123.0}
+			report_path.write_text(json.dumps(record))
 			args.output_normalization = "l2"
 			self.assertFalse(_has_complete_record("AirNet", args))
 
@@ -243,6 +250,8 @@ class DatasetPipelineTests(unittest.TestCase):
 				"unit": "Robot Hardware",
 				"inference_time_scope": "image_preprocessing_through_output_publish",
 				"latency_ns": {"avg": 456.0},
+				"onnxruntime_latency_ns": {"avg": 123.0, "samples": [123.0]},
+				"onnxruntime_inference_time_scope": "session_run_only",
 				"device_analytics": {
 					"timestamp": "ort-time",
 					"onnxruntime_version": "test-ort",
@@ -280,7 +289,9 @@ class DatasetPipelineTests(unittest.TestCase):
 			}
 			self.assertTrue(_merge_profile("AirNet", args, profile))
 			record = json.loads(path.read_text())
-			self.assertNotIn("onnxruntime_latency_ns", record)
+			self.assertEqual(
+				record["onnxruntime_latency_ns"], {"avg": 123.0, "samples": [123.0]}
+			)
 			self.assertEqual(record["latency_ns"], {"avg": 456.0})
 			self.assertEqual(record["cpu_duration"], 200)
 			self.assertEqual(record["cpu_p99_duration"], 209)
@@ -302,6 +313,9 @@ class DatasetPipelineTests(unittest.TestCase):
 			)
 			self.assertEqual(record["onnxruntime_provider"], "CPUExecutionProvider")
 			self.assertEqual(
+				record["onnxruntime_active_providers"], ["CPUExecutionProvider"]
+			)
+			self.assertEqual(
 				record["onnxruntime_consistency_providers"],
 				["CPUExecutionProvider"],
 			)
@@ -319,11 +333,11 @@ class DatasetPipelineTests(unittest.TestCase):
 					"epoch": 50,
 					"metric": "acc",
 					"accuracy": 0.9,
-					"duration": 456 / 1_000_000_000,
+					"duration": 123 / 1_000_000_000,
 					"nn": "AirNet",
 					"accuracy_source": "checkpoint_training_accuracy",
 					"duration_unit": "seconds_per_inference",
-					"duration_source": "image_preprocessing_through_output_publish",
+					"duration_source": "session_run_only",
 				},
 			)
 			nn_stat_csv = path.with_name(f"{path.stem}_nn_stat.csv")
@@ -343,6 +357,22 @@ class DatasetPipelineTests(unittest.TestCase):
 				},
 			)
 			self.assertTrue(record["valid"])
+			self.assertEqual(
+				record["nn_stat"]["duration"], 123 / 1_000_000_000
+			)
+
+			record["device_analytics"]["providers"] = [
+				"CUDAExecutionProvider",
+				"CPUExecutionProvider",
+			]
+			path.write_text(json.dumps(record))
+			self.assertTrue(_merge_profile("AirNet", args, profile))
+			record = json.loads(path.read_text())
+			self.assertIsNone(record["onnxruntime_provider"])
+			self.assertEqual(
+				record["onnxruntime_active_providers"],
+				["CUDAExecutionProvider", "CPUExecutionProvider"],
+			)
 
 			record.pop("nn_stat")
 			path.write_text(json.dumps(record))
@@ -360,6 +390,18 @@ class DatasetPipelineTests(unittest.TestCase):
 			self.assertEqual(record["unit"], "Robot Hardware")
 			self.assertEqual(record["pytorch_duration"], 100)
 			self.assertEqual(record["pytorch_unit"], "Test GPU")
+			profile["gpu_preflight"]["busy"] = True
+			self.assertFalse(_merge_profile("AirNet", args, profile))
+			record = json.loads(path.read_text())
+			self.assertIn("GPU preflight detected a busy GPU", record["error_message"])
+			self.assertFalse(nn_stat_csv.exists())
+			profile["gpu_preflight"]["busy"] = False
+			record.update({"valid": True, "synthetic_input": True, "dropped_frames": 5})
+			path.write_text(json.dumps(record))
+			self.assertFalse(_merge_profile("AirNet", args, profile))
+			record = json.loads(path.read_text())
+			self.assertIn("5 synthetic camera frame(s) were dropped", record["error_message"])
+			self.assertFalse(nn_stat_csv.exists())
 
 	def test_merge_profile_accepts_correct_cpu_without_cuda(self):
 		with TemporaryDirectory() as directory:
@@ -372,6 +414,8 @@ class DatasetPipelineTests(unittest.TestCase):
 				"duration": 123,
 				"unit": "Robot Hardware",
 				"inference_time_scope": "image_preprocessing_through_output_publish",
+				"onnxruntime_latency_ns": {"avg": 123.0, "samples": [123.0]},
+				"onnxruntime_inference_time_scope": "session_run_only",
 				"failed_frames": 2,
 				"clock_inconsistency_frames": 0,
 				"last_frame_error": "RuntimeError: dropped frame",

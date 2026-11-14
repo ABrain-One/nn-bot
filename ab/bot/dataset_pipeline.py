@@ -25,6 +25,7 @@ import numpy as np
 from ab.bot.runtime import (
     CAMERA_DATA_TIMEOUT_EXIT_CODE,
     get_cpu_affinity,
+    measurement_condition_warnings,
     PREPROCESSING_MANIFEST_VERSION,
     sample_cpu_frequencies,
     sample_gpus,
@@ -715,7 +716,9 @@ def _has_complete_record(model_name, args):
     return (
         record.get("valid") is True
         and record.get("dataset") == args.dataset
-        and record.get("profile_version") == 2
+        and record.get("profile_version") == 3
+        and isinstance(record.get("onnxruntime_latency_ns"), dict)
+        and record.get("onnxruntime_latency_ns", {}).get("avg") is not None
         and record.get("preprocessing") == manifest
         and record.get("output_normalization")
         == getattr(args, "output_normalization", "none")
@@ -729,10 +732,13 @@ def _merge_profile(model_name, args, profile):
     ort_version = analytics.get("onnxruntime_version")
     ort_providers = analytics.get("providers")
     ort_timestamp = analytics.get("timestamp")
-    ort_provider = ort_providers[0] if ort_providers else record.get("onnxruntime_provider")
-    record.pop("onnxruntime_latency_ns", None)
-    record.pop("onnxruntime_latency_scope", None)
+    ort_providers = list(ort_providers or [])
+    ort_provider = ort_providers[0] if len(ort_providers) == 1 else None
     record["onnxruntime_provider"] = ort_provider
+    record["onnxruntime_active_providers"] = ort_providers
+    record["onnxruntime_provider_status"] = (
+        "active session providers; per-node execution provider not measured"
+    )
     record["runtime"] = "PyTorch and ONNX Runtime"
     for field in (
         "cpu_duration", "cpu_min_duration", "cpu_max_duration", "cpu_median_duration",
@@ -755,7 +761,7 @@ def _merge_profile(model_name, args, profile):
         record[field] = profile[field]
     record["gpu_backend"] = "PyTorch CUDA" if profile["gpu_runs"] else None
     record["cpu_backend"] = "PyTorch CPU"
-    record["profile_version"] = 2
+    record["profile_version"] = 3
     analytics.update(profile["device_analytics"])
     analytics["onnxruntime_version"] = ort_version
     analytics["onnxruntime_providers"] = ort_providers
@@ -826,11 +832,28 @@ def _merge_profile(model_name, args, profile):
         validation_errors.append(
             f'{record["clock_inconsistency_frames"]} image frame(s) had inconsistent ROS clocks'
         )
+    preflight = profile["gpu_preflight"]
+    if preflight["busy"]:
+        validation_errors.append("GPU preflight detected a busy GPU")
+    if record.get("synthetic_input") and record.get("dropped_frames", 0):
+        validation_errors.append(
+            f'{record["dropped_frames"]} synthetic camera frame(s) were dropped'
+        )
+    condition_warnings = measurement_condition_warnings(
+        record.get("device_analytics", {}).get("cpu_info", {}).get("cpu_frequencies"),
+        record.get("device_analytics", {}).get("cpu_info", {}).get("temperatures"),
+    )
+    condition_warnings.extend(record.get("measurement_condition_warnings") or [])
+    condition_warnings = list(dict.fromkeys(condition_warnings))
+    validation_errors.extend(condition_warnings)
     record["valid"] = bool(
         record.get("valid")
         and (cpu_correct or gpu_correct)
         and not record.get("failed_frames", 0)
         and not record.get("clock_inconsistency_frames", 0)
+        and not preflight["busy"]
+        and not (record.get("synthetic_input") and record.get("dropped_frames", 0))
+        and not condition_warnings
     )
     if not record["valid"]:
         record["error_message"] = "; ".join(validation_errors) or "Inference validation failed"
@@ -857,7 +880,12 @@ def _nn_stat_record(record, model_name):
     if metric == "accuracy":
         metric = "acc"
     accuracy = record.get("training_accuracy")
-    duration_ns = record["duration"]
+    inference_latency = record.get("onnxruntime_latency_ns")
+    if not isinstance(inference_latency, dict) or inference_latency.get("avg") is None:
+        raise ValueError(
+            "NN-Stat export requires ONNX Runtime session.run() timing samples"
+        )
+    duration_ns = inference_latency["avg"]
     return {
         "task": record["task"],
         "dataset": record["dataset"],
@@ -870,7 +898,7 @@ def _nn_stat_record(record, model_name):
             "checkpoint_training_accuracy" if accuracy is not None else "unavailable"
         ),
         "duration_unit": "seconds_per_inference",
-        "duration_source": record["inference_time_scope"],
+        "duration_source": record["onnxruntime_inference_time_scope"],
     }
 
 
@@ -890,12 +918,20 @@ def _write_nn_stat_csv(path, nn_stat_record):
 def _write_nn_stat_exports(path, model_name, record=None):
     if record is None:
         record = json.loads(path.read_text(encoding="utf-8"))
+    csv_path = path.with_name(f"{path.stem}_nn_stat.csv")
+    if record.get("valid") is not True:
+        record.pop("nn_stat", None)
+        temporary_path = path.with_suffix(path.suffix + ".tmp")
+        temporary_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
+        temporary_path.replace(path)
+        csv_path.unlink(missing_ok=True)
+        return
     nn_stat = _nn_stat_record(record, model_name)
     record["nn_stat"] = nn_stat
     temporary_path = path.with_suffix(path.suffix + ".tmp")
     temporary_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
     temporary_path.replace(path)
-    _write_nn_stat_csv(path.with_name(f"{path.stem}_nn_stat.csv"), nn_stat)
+    _write_nn_stat_csv(csv_path, nn_stat)
 
 
 def _run_model(model_path, model_name, args):

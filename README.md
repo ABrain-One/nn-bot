@@ -110,7 +110,9 @@ by the installed ONNX Runtime build.
 
 The standalone ONNX node's primary `latency_ns` measures image conversion and
 preprocessing through ONNX inference and publishing that output, including any
-optional output normalization. Every timing summary includes `avg`, `median`, `p95`,
+optional output normalization. `onnxruntime_latency_ns` separately measures only
+the `session.run()` call and is used for NN-Stat exports. `callback_latency_ns`
+includes callback-entry-to-publish overhead. Every timing summary includes `avg`, `median`, `p95`,
 `p99`, `min`, `max`, `std`, and individual `samples`. Standard deviation uses
 population standard deviation (dividing by N, `ddof=0`), matching nn-lite's
 convention. `deadline_missed_frames` reports how many frames exceeded the
@@ -127,8 +129,11 @@ The `input_shape` field retains the model's actual tensor layout; `in_dim_0`
 through `in_dim_3` use NN-Lite's batch, height, width, channels order so records
 can be merged with that schema. NPU fields (`npu_duration`, `npu_min_duration`,
 `npu_max_duration`, `npu_std_dev`, `npu_runs`, `npu_error`) are included in the
-schema for compatibility. `unit` identifies the host hardware, while
-`onnxruntime_provider` identifies the ONNX Runtime provider used for inference.
+schema for compatibility. `unit` identifies the host hardware.
+`onnxruntime_active_providers` lists the active ONNX Runtime session providers.
+`onnxruntime_provider` is populated only for a single-provider session; with
+multiple providers, per-node execution is unverified. A requested or active CUDA
+provider does not prove that CUDA executed every model node.
 
 For NN-Stat interoperability, each merged result also includes an `nn_stat`
 object in the JSON record and writes
@@ -137,8 +142,8 @@ object in the JSON record and writes
 used by NN-Stat's `process_data()`; it also includes source and unit columns.
 `metric` uses NN-Stat's `acc` code. `accuracy` is the checkpoint's reported
 training accuracy, not accuracy re-measured by this inference run. `duration`
-is the mean ONNX inference latency in seconds per image, not training duration.
-The existing JSON `duration` and all timing fields remain unchanged.
+is the mean `session.run()` time in seconds per image, not training duration.
+The JSON `duration` remains the full image-preprocessing-through-publish latency.
 
 The CSV can be passed directly to NN-Stat's processor:
 
@@ -238,7 +243,10 @@ python -m ab.bot.dataset_pipeline --model AirNet \
 
 The inference node records separate `end_to_end_latency_ns` (image header stamp
 to output publish) and `callback_latency_ns` (callback entry to output publish)
-metrics; their samples are never combined. Frames without a usable header stamp
+metrics; their samples are never combined. `source_to_callback_latency_ns`
+separates camera/header-to-callback delay from callback processing, so an
+end-to-end-minus-callback difference should not automatically be attributed to
+ROS callback queuing. Frames without a usable header stamp
 are omitted from `end_to_end_latency_ns`. If a header timestamp is later than
 the ROS callback-entry or publish time, the frame is counted in
 `clock_inconsistency_frames`, excluded from the header-based metric, and makes
@@ -253,6 +261,11 @@ The synthetic publisher generates a new frame each tick and uses
 `SensorDataQoS` (best-effort). Its `dropped_frames` count estimates missed
 synthetic camera frames from gaps between received source timestamps; it is
 `null` for physical-camera runs, where the source frame rate is not configured.
+Synthetic runs with dropped frames are invalid, as are runs whose GPU preflight
+exceeds configured utilization or memory limits. CPU timing runs are invalidated
+when the captured governor is `powersave`, the reported clock is below 60% of its
+maximum, or a sampled temperature is at least 85 C. Invalidating conditions are
+recorded in `error_message`; these checks do not imply CUDA execution.
 
 For real-robot runs, omit `--emulate-camera` and point `--input-topic` at the
 physical camera. The record uses `synthetic_input: false`; the
@@ -340,6 +353,9 @@ the model, measures the configured number of frames, and writes a record to
 frames are counted and make the record invalid. The pipeline record is also
 valid when at least one PyTorch backend completes and its output passes the
 ONNX consistency check; CUDA is optional when unavailable or unsupported.
+Records are additionally invalidated for dropped synthetic input frames, a busy
+GPU preflight, or CPU telemetry indicating a powersave governor, a clock below
+60% of maximum, or a temperature of at least 85 C.
 `duration`, `unit`, and `inference_time_scope` in the merged record retain the
 ROS image-to-published-output measurement. The validated PyTorch forward-pass
 summary is kept separately in `pytorch_duration`, `pytorch_unit`, and
