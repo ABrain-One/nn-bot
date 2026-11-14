@@ -24,9 +24,10 @@ import numpy as np
 
 from ab.bot.runtime import (
     CAMERA_DATA_TIMEOUT_EXIT_CODE,
+    PREPROCESSING_MANIFEST_VERSION,
+    assess_gpu_load,
     get_cpu_affinity,
     measurement_condition_warnings,
-    PREPROCESSING_MANIFEST_VERSION,
     sample_cpu_frequencies,
     sample_gpus,
     sample_system,
@@ -341,57 +342,7 @@ def _snapshot(phase):
     }
 
 
-def assess_gpu_load(gpus, utilization_limit=20.0, memory_limit_percent=20.0):
-    """Summarize GPU contention against pre-run utilization and memory thresholds."""
-    if not gpus:
-        return {
-            "available": False,
-            "busy": False,
-            "thresholds": {
-                "utilization_percent": utilization_limit,
-                "memory_used_percent": memory_limit_percent,
-            },
-            "devices": [],
-            "warnings": ["GPU usage could not be sampled (nvidia-smi unavailable or failed)"],
-        }
 
-    devices = []
-    warnings = []
-    for gpu in gpus:
-        memory_total = gpu.get("memory_total_mb")
-        memory_used = gpu.get("memory_used_mb")
-        memory_used_percent = (
-            100.0 * memory_used / memory_total if memory_total and memory_used is not None else None
-        )
-        device = {
-            **gpu,
-            "memory_used_percent": memory_used_percent,
-            "busy": False,
-        }
-        if gpu.get("util_percent") is not None and gpu["util_percent"] > utilization_limit:
-            device["busy"] = True
-            warnings.append(
-                f'GPU {gpu.get("index", "?")} utilization is {gpu["util_percent"]}% '
-                f"(limit {utilization_limit:g}%)"
-            )
-        if memory_used_percent is not None and memory_used_percent > memory_limit_percent:
-            device["busy"] = True
-            warnings.append(
-                f'GPU {gpu.get("index", "?")} memory use is {memory_used_percent:.1f}% '
-                f"({memory_used} of {memory_total} MB; limit {memory_limit_percent:g}%)"
-            )
-        devices.append(device)
-
-    return {
-        "available": True,
-        "busy": any(device["busy"] for device in devices),
-        "thresholds": {
-            "utilization_percent": utilization_limit,
-            "memory_used_percent": memory_limit_percent,
-        },
-        "devices": devices,
-        "warnings": warnings,
-    }
 
 
 def _model_output(output):
@@ -716,7 +667,11 @@ def _has_complete_record(model_name, args):
     return (
         record.get("valid") is True
         and record.get("dataset") == args.dataset
-        and record.get("profile_version") == 3
+        and record.get("profile_version") == 4
+        and record.get("run_complete") is True
+        and record.get("performance_measurement_valid") is True
+        and record.get("inference_correctness_valid") is True
+        and record.get("preprocessing_provenance_valid") is True
         and isinstance(record.get("onnxruntime_latency_ns"), dict)
         and record.get("onnxruntime_latency_ns", {}).get("avg") is not None
         and record.get("preprocessing") == manifest
@@ -761,7 +716,7 @@ def _merge_profile(model_name, args, profile):
         record[field] = profile[field]
     record["gpu_backend"] = "PyTorch CUDA" if profile["gpu_runs"] else None
     record["cpu_backend"] = "PyTorch CPU"
-    record["profile_version"] = 3
+    record["profile_version"] = 4
     analytics.update(profile["device_analytics"])
     analytics["onnxruntime_version"] = ort_version
     analytics["onnxruntime_providers"] = ort_providers
@@ -772,9 +727,16 @@ def _merge_profile(model_name, args, profile):
     record["onnxruntime_consistency_providers"] = profile[
         "onnxruntime_consistency_providers"
     ]
-    record["gpu_preflight"] = {
+    pytorch_gpu_preflight = {
         "snapshot": profile["gpu_preflight_snapshot"],
         "assessment": profile["gpu_preflight"],
+    }
+    ros_gpu_preflight = record.get("gpu_preflight")
+    if ros_gpu_preflight and "ros" in ros_gpu_preflight:
+        ros_gpu_preflight = ros_gpu_preflight["ros"]
+    record["gpu_preflight"] = {
+        "ros": {"label": "ROS", **(ros_gpu_preflight or {})},
+        "pytorch": {"label": "PyTorch", **pytorch_gpu_preflight},
     }
 
     cpu_correct = (
@@ -832,11 +794,29 @@ def _merge_profile(model_name, args, profile):
         validation_errors.append(
             f'{record["clock_inconsistency_frames"]} image frame(s) had inconsistent ROS clocks'
         )
-    preflight = profile["gpu_preflight"]
-    if preflight["busy"]:
-        validation_errors.append("GPU preflight detected a busy GPU")
+    measurement_quality_errors = list(record.get("measurement_quality_errors") or [])
+    if record.get("failed_frames", 0):
+        measurement_quality_errors.append(
+            f'{record["failed_frames"]} image frame(s) failed during ROS inference'
+        )
+    if record.get("clock_inconsistency_frames", 0):
+        measurement_quality_errors.append(
+            f'{record["clock_inconsistency_frames"]} image frame(s) had inconsistent ROS clocks'
+        )
+    if record.get("run_complete") is not True:
+        measurement_quality_errors.append(
+            "ROS benchmark did not complete the requested number of frames"
+        )
+    for label, preflight in (
+        ("ROS", ros_gpu_preflight),
+        ("PyTorch", pytorch_gpu_preflight),
+    ):
+        if preflight and preflight.get("assessment", {}).get("busy"):
+            measurement_quality_errors.append(
+                f"{label} GPU preflight detected a busy GPU"
+            )
     if record.get("synthetic_input") and record.get("dropped_frames", 0):
-        validation_errors.append(
+        measurement_quality_errors.append(
             f'{record["dropped_frames"]} synthetic camera frame(s) were dropped'
         )
     condition_warnings = measurement_condition_warnings(
@@ -845,18 +825,52 @@ def _merge_profile(model_name, args, profile):
     )
     condition_warnings.extend(record.get("measurement_condition_warnings") or [])
     condition_warnings = list(dict.fromkeys(condition_warnings))
-    validation_errors.extend(condition_warnings)
-    record["valid"] = bool(
-        record.get("valid")
-        and (cpu_correct or gpu_correct)
+    measurement_quality_errors.extend(condition_warnings)
+    measurement_quality_errors = list(dict.fromkeys(measurement_quality_errors))
+    inference_correctness_valid = bool(cpu_correct or gpu_correct)
+    measurement_conditions_valid = bool(
+        record.get(
+            "measurement_conditions_valid",
+            record.get("valid") is True,
+        )
+        and record.get("run_complete") is True
         and not record.get("failed_frames", 0)
         and not record.get("clock_inconsistency_frames", 0)
-        and not preflight["busy"]
-        and not (record.get("synthetic_input") and record.get("dropped_frames", 0))
-        and not condition_warnings
+        and not measurement_quality_errors
     )
+    performance_quality_errors = list(measurement_quality_errors)
+    if not record.get("preprocessing_provenance_valid", False):
+        performance_quality_errors.append(
+            "Preprocessing manifest is missing or unverified"
+        )
+    if record.get("onnxruntime_profiling_enabled"):
+        performance_quality_errors.append(
+            "ONNX Runtime profiling is enabled; latency samples are diagnostic only"
+        )
+    performance_quality_errors = list(dict.fromkeys(performance_quality_errors))
+    performance_measurement_valid = bool(
+        measurement_conditions_valid
+        and record.get("preprocessing_provenance_valid", False)
+        and not record.get("onnxruntime_profiling_enabled")
+    )
+    record["measurement_quality_errors"] = measurement_quality_errors
+    record["measurement_conditions_valid"] = measurement_conditions_valid
+    record["inference_correctness_valid"] = inference_correctness_valid
+    record["inference_validation_status"] = (
+        "passed" if inference_correctness_valid else "failed"
+    )
+    record["performance_measurement_valid"] = performance_measurement_valid
+    record["valid"] = performance_measurement_valid and inference_correctness_valid
+    if not inference_correctness_valid:
+        validation_errors.append("No PyTorch backend passed ONNX output validation")
+    record["inference_validation_errors"] = (
+        list(validation_errors) if not inference_correctness_valid else []
+    )
+    record["performance_quality_errors"] = performance_quality_errors
     if not record["valid"]:
-        record["error_message"] = "; ".join(validation_errors) or "Inference validation failed"
+        record["error_message"] = "; ".join(
+            dict.fromkeys(validation_errors + performance_quality_errors)
+        ) or "Inference validation failed"
     else:
         record["error_message"] = None
 
@@ -960,6 +974,9 @@ def _run_model(model_path, model_name, args):
         "deadline_ms": args.deadline_ms,
         "cpu_affinity": args.cpu_affinity if args.cpu_affinity is not None else -1,
         "onnx_num_threads": args.onnx_num_threads,
+        "gpu_utilization_limit": args.gpu_utilization_limit,
+        "gpu_memory_limit_percent": args.gpu_memory_limit_percent,
+        "enable_onnx_profiling": args.enable_onnx_profiling,
         "exit_after_benchmark": True,
     }
     command = _inference_command()
@@ -1082,6 +1099,11 @@ def parser():
     )
     ap.add_argument("--gpu-utilization-limit", type=float, default=20.0)
     ap.add_argument("--gpu-memory-limit-percent", type=float, default=20.0)
+    ap.add_argument(
+        "--enable-onnx-profiling",
+        action="store_true",
+        help="Capture an ONNX Runtime per-node provider trace; latency results are diagnostic only",
+    )
     ap.add_argument("--onnx-dir", type=Path, default=Path("_work/onnx"))
     ap.add_argument("--results-dir", type=Path, default=Path("stats"))
     ap.add_argument("--export-only", action="store_true", help="Export ONNX files without starting ROS inference")

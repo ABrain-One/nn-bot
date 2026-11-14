@@ -118,6 +118,16 @@ population standard deviation (dividing by N, `ddof=0`), matching nn-lite's
 convention. `deadline_missed_frames` reports how many frames exceeded the
 configured deadline (default: 33 ms at 30 Hz).
 
+Records keep measurement and inference validation separate:
+`run_complete` means the requested number of frames was collected;
+`measurement_conditions_valid` reports clock, camera-rate, dropped-frame, CPU,
+and GPU-preflight checks; `preprocessing_provenance_valid` requires a model
+preprocessing manifest; and `inference_correctness_valid` is set by the
+PyTorch/ONNX comparison. `performance_measurement_valid` is false when conditions
+are unsuitable, preprocessing is unverified, or ONNX profiling is enabled.
+`valid` is true only when the run is complete, the performance measurement is
+comparable, and at least one tested backend passes correctness checks.
+
 To ensure controlled measurement conditions:
 - **CPU Pinning**: Pin the process to a specific core using `cpu_affinity` (e.g. `-p cpu_affinity:=0`).
 - **Fixed Clocks**: CPU scaling governors and frequencies are monitored and logged in `device_analytics.cpu_frequencies`.
@@ -134,6 +144,19 @@ schema for compatibility. `unit` identifies the host hardware.
 `onnxruntime_provider` is populated only for a single-provider session; with
 multiple providers, per-node execution is unverified. A requested or active CUDA
 provider does not prove that CUDA executed every model node.
+
+For a separate diagnostic run, pass `--enable-onnx-profiling` to save an
+ONNX Runtime trace and summarize per-node event counts, unique nodes, and
+operators by execution provider in `onnxruntime_profile`. Profiling adds
+overhead; those latency samples are therefore explicitly marked diagnostic and
+must not be used as performance results. Keep profiling disabled for timing runs.
+For example:
+
+```bash
+python -m ab.bot.dataset_pipeline --model MobileNetV3 \
+	--dataset cifar-10 --emulate-camera --enable-onnx-profiling \
+	--results-dir _work/provider-diagnostics
+```
 
 For NN-Stat interoperability, each merged result also includes an `nn_stat`
 object in the JSON record and writes
@@ -241,6 +264,15 @@ python -m ab.bot.dataset_pipeline --model AirNet \
 	--camera-rate-hz 30
 ```
 
+Use the pipeline-generated preprocessing manifest for measurements. If the ROS
+node runs without one, it still accepts images using legacy parameters, but
+marks preprocessing provenance unverified and the performance result invalid.
+The node checks and records CPU telemetry before and after the ROS run and takes
+a GPU utilization/memory preflight immediately before constructing the ONNX
+session. Thresholds can be set with `--gpu-utilization-limit` and
+`--gpu-memory-limit-percent`; the node reports both the ROS-session and
+PyTorch-profile preflights separately.
+
 The inference node records separate `end_to_end_latency_ns` (image header stamp
 to output publish) and `callback_latency_ns` (callback entry to output publish)
 metrics; their samples are never combined. `source_to_callback_latency_ns`
@@ -266,6 +298,18 @@ exceeds configured utilization or memory limits. CPU timing runs are invalidated
 when the captured governor is `powersave`, the reported clock is below 60% of its
 maximum, or a sampled temperature is at least 85 C. Invalidating conditions are
 recorded in `error_message`; these checks do not imply CUDA execution.
+
+To find a sustainable camera rate, run separate benchmarks at (for example)
+15, 20, 25, and 30 Hz, using a distinct `--results-dir` for each run. Compare
+`input_rate_target_met`, `observed_input_rate_hz`, and `dropped_frames` before
+comparing latency. A lower camera-rate run characterizes that rate; it does not
+demonstrate that the pipeline sustains 30 Hz. Keep model, preprocessing
+manifest, warmups, iteration count, CPU settings, and GPU preflight limits fixed
+across the sweep. Do not change system-wide CPU governors automatically; set
+and document the environment intentionally before a controlled measurement.
+For example, use `_work/rate-sweep/15hz`, `_work/rate-sweep/20hz`, and so on as
+the four result directories; repeat each rate into a separate repeat-specific
+directory and do not overwrite or combine raw records.
 
 For real-robot runs, omit `--emulate-camera` and point `--input-topic` at the
 physical camera. The record uses `synthetic_input: false`; the
@@ -350,12 +394,14 @@ The runner exports ONNX models under `_work/onnx/<dataset>/`, then starts the
 ROS inference node for each model. It listens to the live image topic, warms up
 the model, measures the configured number of frames, and writes a record to
 `stats/<model>/robot_<dataset>_<hostname>.json` before advancing. Failed image
-frames are counted and make the record invalid. The pipeline record is also
-valid when at least one PyTorch backend completes and its output passes the
-ONNX consistency check; CUDA is optional when unavailable or unsupported.
-Records are additionally invalidated for dropped synthetic input frames, a busy
-GPU preflight, or CPU telemetry indicating a powersave governor, a clock below
-60% of maximum, or a temperature of at least 85 C.
+frames are counted and make the record invalid. Overall validity requires a
+complete ROS run, valid measurement conditions and preprocessing provenance,
+and at least one PyTorch backend passing the ONNX consistency check; CUDA is
+optional when unavailable or unsupported. The record reports each component
+separately so a correct inference can be distinguished from an unsuitable
+performance measurement. Runs are invalidated for dropped or under-rate
+synthetic input, a busy GPU preflight, or CPU telemetry indicating a powersave
+governor, a clock below 60% of maximum, or a temperature of at least 85 C.
 `duration`, `unit`, and `inference_time_scope` in the merged record retain the
 ROS image-to-published-output measurement. The validated PyTorch forward-pass
 summary is kept separately in `pytorch_duration`, `pytorch_unit`, and

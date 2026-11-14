@@ -22,6 +22,7 @@ from std_msgs.msg import Bool, Float32MultiArray, MultiArrayDimension
 
 from ab.bot.runtime import (
     CAMERA_DATA_TIMEOUT_EXIT_CODE,
+    assess_gpu_load,
     device_name,
     dropped_frames_between,
     get_cpu_affinity,
@@ -32,8 +33,10 @@ from ab.bot.runtime import (
     preprocess_image,
     process_model_output,
     sample_cpu_frequencies,
+    sample_gpus,
     sample_temperatures,
     set_cpu_affinity,
+    summarize_onnxruntime_profile,
     timing_stats,
 )
 
@@ -56,6 +59,9 @@ class InferenceNode(Node):
         self.declare_parameter("deadline_ms", 33.0)
         self.declare_parameter("cpu_affinity", -1)
         self.declare_parameter("onnx_num_threads", 0)
+        self.declare_parameter("gpu_utilization_limit", 20.0)
+        self.declare_parameter("gpu_memory_limit_percent", 20.0)
+        self.declare_parameter("enable_onnx_profiling", False)
         self.declare_parameter("startup_drop_frames", 10)
         self.declare_parameter("ready_topic", "/nn_bot/ready")
         self.declare_parameter("input_scale", 1.0 / 255.0)
@@ -97,6 +103,7 @@ class InferenceNode(Node):
         self.preprocessing_manifest_path = (
             manifest_path if self.preprocessing_manifest is not None else None
         )
+        self.results_dir = Path(self.get_parameter("results_dir").value).expanduser()
         if (
             self.preprocessing_manifest is not None
             and self.preprocessing_manifest.get("model") not in (None, model_path.stem)
@@ -105,6 +112,17 @@ class InferenceNode(Node):
                 f"Preprocessing manifest model {self.preprocessing_manifest['model']!r} "
                 f"does not match ONNX model {model_path.stem!r}"
             )
+        configured_dataset = str(self.get_parameter("dataset").value)
+        if (
+            self.preprocessing_manifest is not None
+            and self.preprocessing_manifest.get("dataset")
+            not in (None, configured_dataset)
+        ):
+            raise ValueError(
+                f"Preprocessing manifest dataset "
+                f"{self.preprocessing_manifest['dataset']!r} does not match "
+                f"configured dataset {configured_dataset!r}"
+            )
         self.output_normalization = str(
             self.get_parameter("output_normalization").value
         )
@@ -112,6 +130,19 @@ class InferenceNode(Node):
             raise ValueError("output_normalization must be 'none' or 'l2'")
         self.synthetic_input = bool(self.get_parameter("synthetic_input").value)
         self.camera_rate_hz = float(self.get_parameter("camera_rate_hz").value)
+        gpu_utilization_limit = float(
+            self.get_parameter("gpu_utilization_limit").value
+        )
+        gpu_memory_limit_percent = float(
+            self.get_parameter("gpu_memory_limit_percent").value
+        )
+        if (
+            not math.isfinite(gpu_utilization_limit)
+            or not 0 <= gpu_utilization_limit <= 100
+            or not math.isfinite(gpu_memory_limit_percent)
+            or not 0 <= gpu_memory_limit_percent <= 100
+        ):
+            raise ValueError("GPU utilization and memory limits must be percentages from 0 to 100")
         self.camera_data_timeout = float(
             self.get_parameter("camera_data_timeout").value
         )
@@ -131,9 +162,30 @@ class InferenceNode(Node):
                 f"{requested_providers}; available: {available_providers}"
             )
 
+        self.cpu_frequencies_before = sample_cpu_frequencies()
+        self.temperatures_before = sample_temperatures()
         if "CUDAExecutionProvider" in providers and hasattr(ort, "preload_dlls"):
             ort.preload_dlls()
+        gpu_preflight_snapshot = sample_gpus()
+        gpu_preflight = assess_gpu_load(
+            gpu_preflight_snapshot,
+            utilization_limit=gpu_utilization_limit,
+            memory_limit_percent=gpu_memory_limit_percent,
+        )
         session_options = ort.SessionOptions()
+        self.enable_onnx_profiling = bool(
+            self.get_parameter("enable_onnx_profiling").value
+        )
+        profile_prefix = None
+        if self.enable_onnx_profiling:
+            profile_dir = self.results_dir / model_path.stem
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            profile_prefix = profile_dir / (
+                "onnxruntime_profile_"
+                + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ")
+            )
+            session_options.enable_profiling = True
+            session_options.profile_file_prefix = str(profile_prefix)
         onnx_num_threads = int(self.get_parameter("onnx_num_threads").value)
         if onnx_num_threads > 0:
             session_options.intra_op_num_threads = onnx_num_threads
@@ -142,6 +194,9 @@ class InferenceNode(Node):
             str(model_path), sess_options=session_options, providers=providers
         )
         active_providers = self.session.get_providers()
+        self.gpu_preflight_snapshot = gpu_preflight_snapshot
+        self.gpu_preflight = gpu_preflight
+        self.onnxruntime_profile_prefix = profile_prefix
         if "CUDAExecutionProvider" in providers and "CUDAExecutionProvider" not in active_providers:
             self.get_logger().warning(
                 "CUDAExecutionProvider was requested but did not initialize; "
@@ -150,8 +205,18 @@ class InferenceNode(Node):
         self.model_input = self.session.get_inputs()[0]
         self.model_path = model_path
         self.input_scale = float(self.get_parameter("input_scale").value)
-        self.input_mean = list(self.get_parameter("input_mean").value)
-        self.input_std = list(self.get_parameter("input_std").value)
+        self.input_mean = list(
+            self.get_parameter_or(
+                "input_mean",
+                Parameter("input_mean", Parameter.Type.DOUBLE_ARRAY, []),
+            ).value
+        )
+        self.input_std = list(
+            self.get_parameter_or(
+                "input_std",
+                Parameter("input_std", Parameter.Type.DOUBLE_ARRAY, []),
+            ).value
+        )
         if self.preprocessing_manifest is not None:
             preprocess_image(
                 np.zeros((1, 1, 3), dtype=np.uint8),
@@ -163,7 +228,6 @@ class InferenceNode(Node):
         if self.iterations < 1:
             raise ValueError("iterations must be at least 1")
 
-        self.results_dir = Path(self.get_parameter("results_dir").value).expanduser()
         self.bridge = CvBridge()
         self.completed_warmups = 0
         self.startup_drop_frames = max(
@@ -355,29 +419,69 @@ class InferenceNode(Node):
         deadline_missed_frames = int(sum(1 for lat in self.latencies_ns if lat > deadline_ns))
         cpu_frequencies = sample_cpu_frequencies()
         temperatures = sample_temperatures()
-        condition_warnings = measurement_condition_warnings(
-            cpu_frequencies, temperatures
+        cpu_frequencies_before = self.cpu_frequencies_before
+        temperatures_before = self.temperatures_before
+        condition_warnings = list(dict.fromkeys(
+            measurement_condition_warnings(cpu_frequencies_before, temperatures_before)
+            + measurement_condition_warnings(cpu_frequencies, temperatures)
+        ))
+        observed_input_rate_hz = (
+            1_000_000_000 / float(np.mean(np.diff(self.arrival_timestamps_ns)))
+            if len(self.arrival_timestamps_ns) > 1
+            else None
         )
         dropped_frames = self.dropped_frames if self.synthetic_input else None
-        validity_errors = []
+        measurement_quality_errors = []
         if self.failed_frames:
-            validity_errors.append(
+            measurement_quality_errors.append(
                 f"{self.failed_frames} image frame(s) failed: {self.last_frame_error}"
             )
         if self.clock_inconsistency_frames:
-            validity_errors.append(
+            measurement_quality_errors.append(
                 f"{self.clock_inconsistency_frames} image frame(s) had inconsistent ROS clocks: "
                 f"{self.clock_error_message}"
             )
         if len(self.latencies_ns) != self.iterations:
-            validity_errors.append(
+            measurement_quality_errors.append(
                 f"collected {len(self.latencies_ns)} of {self.iterations} requested inference samples"
             )
         if dropped_frames:
-            validity_errors.append(f"{dropped_frames} synthetic camera frame(s) were dropped")
-        validity_errors.extend(condition_warnings)
-        valid = not validity_errors
+            measurement_quality_errors.append(
+                f"{dropped_frames} synthetic camera frame(s) were dropped"
+            )
+        input_rate_met = (
+            not self.synthetic_input
+            or (
+                observed_input_rate_hz is not None
+                and observed_input_rate_hz >= self.camera_rate_hz * 0.95
+            )
+        )
+        if self.synthetic_input and not input_rate_met:
+            measurement_quality_errors.append(
+                f"observed input rate {observed_input_rate_hz:.2f} Hz was below "
+                f"95% of the requested {self.camera_rate_hz:g} Hz"
+            )
+        if self.gpu_preflight["busy"]:
+            measurement_quality_errors.append("GPU preflight detected a busy GPU")
+        measurement_quality_errors.extend(condition_warnings)
+        measurement_conditions_valid = not measurement_quality_errors
+        preprocessing_provenance_valid = self.preprocessing_manifest is not None
+        performance_quality_errors = list(measurement_quality_errors)
+        if not preprocessing_provenance_valid:
+            performance_quality_errors.append(
+                "No preprocessing manifest; legacy parameter preprocessing is not verified"
+            )
+        if self.enable_onnx_profiling:
+            performance_quality_errors.append(
+                "ONNX Runtime profiling is enabled; latency samples are diagnostic only"
+            )
+        performance_quality_errors = list(dict.fromkeys(performance_quality_errors))
+        performance_measurement_valid = not performance_quality_errors
         active_providers = self.session.get_providers()
+        onnxruntime_profile = None
+        if self.enable_onnx_profiling:
+            profile_path = self.session.end_profiling()
+            onnxruntime_profile = summarize_onnxruntime_profile(profile_path)
         record = {
             "model_name": self.model_path.stem,
             "dataset": str(self.get_parameter("dataset").value),
@@ -385,17 +489,29 @@ class InferenceNode(Node):
             "board": device_type,
             "architecture": platform.machine(),
             "os_version": platform.platform(),
-            "valid": valid,
-            "profile_version": 3,
+            "valid": False,
+            "profile_version": 4,
+            "run_complete": (
+                len(self.latencies_ns) == self.iterations and self.failed_frames == 0
+            ),
+            "measurement_conditions_valid": measurement_conditions_valid,
+            "preprocessing_provenance_valid": preprocessing_provenance_valid,
+            "preprocessing_provenance_status": (
+                "model_manifest" if preprocessing_provenance_valid
+                else "legacy_ros_parameters_unverified"
+            ),
+            "inference_correctness_valid": None,
+            "inference_validation_status": "pending_pytorch_onnx_comparison",
+            "performance_measurement_valid": performance_measurement_valid,
+            "measurement_quality_errors": measurement_quality_errors,
+            "performance_quality_errors": performance_quality_errors,
             "emulator": False,
             "synthetic_input": self.synthetic_input,
             "input_source": "synthetic_camera" if self.synthetic_input else "sensor_topic",
             "camera_rate_hz": self.camera_rate_hz if self.synthetic_input else None,
-            "observed_input_rate_hz": (
-                1_000_000_000 / float(np.mean(np.diff(self.arrival_timestamps_ns)))
-                if len(self.arrival_timestamps_ns) > 1
-                else None
-            ),
+            "observed_input_rate_hz": observed_input_rate_hz,
+            "input_rate_target_met": input_rate_met,
+            "input_rate_tolerance_fraction": 0.95,
             "iterations": self.iterations,
             "startup_drop_frames": self.startup_drop_frames,
             "startup_frames_dropped": self.startup_frames_dropped,
@@ -406,7 +522,8 @@ class InferenceNode(Node):
             "clock_error_message": self.clock_error_message,
             "dropped_frames": dropped_frames,
             "last_frame_error": self.last_frame_error,
-            "error_message": "; ".join(validity_errors) or None,
+            "error_message": "; ".join(performance_quality_errors)
+            or "Inference correctness validation has not run",
             "duration": int(round(float(np.mean(self.latencies_ns)))),
             "deadline_ms": deadline_ms,
             "deadline_missed_frames": deadline_missed_frames,
@@ -430,6 +547,8 @@ class InferenceNode(Node):
             "onnxruntime_provider_status": (
                 "active session providers; per-node execution provider not measured"
             ),
+            "onnxruntime_profiling_enabled": self.enable_onnx_profiling,
+            "onnxruntime_profile": onnxruntime_profile,
             "model_format": "onnx",
             "output_normalization": self.output_normalization,
             "preprocessing_manifest": (
@@ -473,6 +592,10 @@ class InferenceNode(Node):
             ),
             "source_to_callback_latency_scope": "image_header_stamp_to_callback_entry",
             "measurement_condition_warnings": condition_warnings,
+            "gpu_preflight": {
+                "snapshot": self.gpu_preflight_snapshot,
+                "assessment": self.gpu_preflight,
+            },
             "in_dim_0": input_batch,
             "in_dim_1": input_height,
             "in_dim_2": input_width,
@@ -484,12 +607,16 @@ class InferenceNode(Node):
                 "cpu_cores": os.cpu_count(),
                 "cpu_affinity": get_cpu_affinity(),
                 "cpu_frequencies": cpu_frequencies,
+                "cpu_frequencies_before": cpu_frequencies_before,
                 "temperatures": temperatures,
+                "temperatures_before": temperatures_before,
                 "onnxruntime_version": ort.__version__,
                 "onnx_num_threads": int(self.get_parameter("onnx_num_threads").value) or None,
                 "providers": self.session.get_providers(),
             },
         }
+        record["warmup_runs"] = self.warmup_runs
+        record["completed_warmups"] = self.completed_warmups
         output_dir = self.results_dir / self.model_path.stem
         output_dir.mkdir(parents=True, exist_ok=True)
         dataset = str(self.get_parameter("dataset").value)

@@ -47,6 +47,7 @@ class DatasetPipelineTests(unittest.TestCase):
 		self.assertEqual(args.deadline_ms, 33.0)
 		self.assertIsNone(args.cpu_affinity)
 		self.assertEqual(args.onnx_num_threads, 1)
+		self.assertFalse(args.enable_onnx_profiling)
 		self.assertEqual(args.camera_data_timeout, 90.0)
 		self.assertEqual(args.output_normalization, "none")
 		self.assertEqual(
@@ -116,8 +117,12 @@ class DatasetPipelineTests(unittest.TestCase):
 			report_path.write_text(json.dumps({
 				"valid": True,
 				"dataset": args.dataset,
-				"profile_version": 3,
+				"profile_version": 4,
+				"run_complete": True,
 				"onnxruntime_latency_ns": {"avg": 123.0},
+				"performance_measurement_valid": True,
+				"inference_correctness_valid": True,
+				"preprocessing_provenance_valid": True,
 				"preprocessing": manifest,
 				"output_normalization": "none",
 			}))
@@ -143,6 +148,11 @@ class DatasetPipelineTests(unittest.TestCase):
 		self.assertEqual(defaults.gpu_utilization_limit, 20.0)
 		self.assertEqual(defaults.gpu_memory_limit_percent, 20.0)
 		self.assertEqual(strict.gpu_busy_policy, "fail")
+
+	def test_cli_supports_diagnostic_onnx_profiling(self):
+		args = parser().parse_args(["--model", "AirNet", "--enable-onnx-profiling"])
+
+		self.assertTrue(args.enable_onnx_profiling)
 
 	def test_cli_supports_camera_emulation_and_rate(self):
 		args = parser().parse_args(["--model", "AirNet", "--emulate-camera", "--camera-rate-hz", "24"])
@@ -252,6 +262,12 @@ class DatasetPipelineTests(unittest.TestCase):
 				"latency_ns": {"avg": 456.0},
 				"onnxruntime_latency_ns": {"avg": 123.0, "samples": [123.0]},
 				"onnxruntime_inference_time_scope": "session_run_only",
+				"measurement_conditions_valid": True,
+				"run_complete": True,
+				"preprocessing_provenance_valid": True,
+				"performance_measurement_valid": True,
+				"onnxruntime_profiling_enabled": False,
+				"measurement_quality_errors": [],
 				"device_analytics": {
 					"timestamp": "ort-time",
 					"onnxruntime_version": "test-ort",
@@ -321,9 +337,13 @@ class DatasetPipelineTests(unittest.TestCase):
 			)
 			self.assertEqual(len(record["gpu_runs_ns"]), 20)
 			self.assertEqual(
-				record["gpu_preflight"]["assessment"]["busy"],
+				record["gpu_preflight"]["pytorch"]["assessment"]["busy"],
 				False,
 			)
+			self.assertTrue(record["measurement_conditions_valid"])
+			self.assertTrue(record["inference_correctness_valid"])
+			self.assertTrue(record["performance_measurement_valid"])
+			self.assertTrue(record["preprocessing_provenance_valid"])
 			self.assertEqual(record["device_analytics"]["onnxruntime_timestamp"], "ort-time")
 			self.assertEqual(
 				record["nn_stat"],
@@ -402,6 +422,45 @@ class DatasetPipelineTests(unittest.TestCase):
 			record = json.loads(path.read_text())
 			self.assertIn("5 synthetic camera frame(s) were dropped", record["error_message"])
 			self.assertFalse(nn_stat_csv.exists())
+			record.update(
+				{
+					"valid": True,
+					"synthetic_input": False,
+					"dropped_frames": None,
+					"measurement_conditions_valid": True,
+					"measurement_quality_errors": [],
+					"onnxruntime_profiling_enabled": True,
+				}
+			)
+			path.write_text(json.dumps(record))
+			self.assertFalse(_merge_profile("AirNet", args, profile))
+			record = json.loads(path.read_text())
+			self.assertTrue(record["measurement_conditions_valid"])
+			self.assertTrue(record["inference_correctness_valid"])
+			self.assertFalse(record["performance_measurement_valid"])
+			self.assertIn(
+				"ONNX Runtime profiling is enabled",
+				record["performance_quality_errors"][-1],
+			)
+			record.update(
+				{
+					"valid": True,
+					"onnxruntime_profiling_enabled": False,
+					"preprocessing_provenance_valid": False,
+					"measurement_conditions_valid": True,
+					"measurement_quality_errors": [],
+				}
+			)
+			path.write_text(json.dumps(record))
+			self.assertFalse(_merge_profile("AirNet", args, profile))
+			record = json.loads(path.read_text())
+			self.assertTrue(record["measurement_conditions_valid"])
+			self.assertTrue(record["inference_correctness_valid"])
+			self.assertFalse(record["performance_measurement_valid"])
+			self.assertIn(
+				"Preprocessing manifest is missing",
+				record["performance_quality_errors"][-1],
+			)
 
 	def test_merge_profile_accepts_correct_cpu_without_cuda(self):
 		with TemporaryDirectory() as directory:
@@ -416,6 +475,10 @@ class DatasetPipelineTests(unittest.TestCase):
 				"inference_time_scope": "image_preprocessing_through_output_publish",
 				"onnxruntime_latency_ns": {"avg": 123.0, "samples": [123.0]},
 				"onnxruntime_inference_time_scope": "session_run_only",
+				"measurement_conditions_valid": False,
+				"run_complete": True,
+				"preprocessing_provenance_valid": True,
+				"measurement_quality_errors": [],
 				"failed_frames": 2,
 				"clock_inconsistency_frames": 0,
 				"last_frame_error": "RuntimeError: dropped frame",
@@ -463,6 +526,8 @@ class DatasetPipelineTests(unittest.TestCase):
 			self.assertEqual(record["failed_frames"], 2)
 
 			record["failed_frames"] = 0
+			record["measurement_conditions_valid"] = True
+			record["measurement_quality_errors"] = []
 			record["valid"] = True
 			record["clock_inconsistency_frames"] = 1
 			path.write_text(json.dumps(record))
@@ -472,6 +537,8 @@ class DatasetPipelineTests(unittest.TestCase):
 			self.assertIn("1 image frame(s) had inconsistent ROS clocks", record["error_message"])
 
 			record["clock_inconsistency_frames"] = 0
+			record["measurement_conditions_valid"] = True
+			record["measurement_quality_errors"] = []
 			record["valid"] = True
 			path.write_text(json.dumps(record))
 			self.assertTrue(_merge_profile("AirNet", args, profile))

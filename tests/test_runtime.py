@@ -18,12 +18,61 @@ from ab.bot.runtime import (
     sample_cpu_frequencies,
     sample_temperatures,
     set_cpu_affinity,
+    summarize_onnxruntime_profile,
     synthetic_rgb_frame,
     timing_stats,
 )
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_summarizes_onnx_node_execution_providers(self):
+        import json
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "trace.json"
+            path.write_text(json.dumps([
+                {
+                    "cat": "Node",
+                    "name": "Conv_0_kernel_time",
+                    "args": {"provider": "CUDAExecutionProvider", "op_name": "Conv"},
+                },
+                {
+                    "cat": "Node",
+                    "name": "Relu_1_kernel_time",
+                    "args": {"provider": "CPUExecutionProvider", "op_name": "Relu"},
+                },
+                {"cat": "Session", "name": "session", "args": {}},
+            ]))
+
+            summary = summarize_onnxruntime_profile(path)
+
+        self.assertEqual(
+            summary["node_execution_event_counts"],
+            {"CUDAExecutionProvider": 1, "CPUExecutionProvider": 1},
+        )
+        self.assertEqual(
+            summary["unique_node_counts_by_provider"],
+            {"CUDAExecutionProvider": 1, "CPUExecutionProvider": 1},
+        )
+        self.assertEqual(
+            summary["operator_event_counts_by_provider"]["CUDAExecutionProvider"],
+            {"Conv": 1},
+        )
+
+    def test_profile_summary_rejects_trace_without_provider_node_events(self):
+        import json
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "trace.json"
+            path.write_text(json.dumps([{"cat": "Session", "args": {}}]))
+
+            with self.assertRaisesRegex(ValueError, "no provider-tagged node events"):
+                summarize_onnxruntime_profile(path)
+
     def test_measurement_conditions_flag_powersave_low_clock_and_high_temperature(self):
         warnings = measurement_condition_warnings(
             {

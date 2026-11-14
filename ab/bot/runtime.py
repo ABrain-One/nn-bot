@@ -6,6 +6,7 @@ import os
 import platform
 import shutil
 import subprocess
+from collections import Counter, defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -419,6 +420,102 @@ def measurement_condition_warnings(cpu_frequencies, temperatures):
                     f"{entry.get('label') or sensor} temperature is at least 85 C"
                 )
     return warnings
+
+
+def assess_gpu_load(gpus, utilization_limit=20.0, memory_limit_percent=20.0):
+    """Assess sampled GPU utilization and memory against benchmark limits."""
+    thresholds = {
+        "utilization_percent": utilization_limit,
+        "memory_used_percent": memory_limit_percent,
+    }
+    if not gpus:
+        return {
+            "available": False,
+            "busy": False,
+            "thresholds": thresholds,
+            "devices": [],
+            "warnings": ["GPU usage could not be sampled (nvidia-smi unavailable or failed)"],
+        }
+
+    devices = []
+    warnings = []
+    for gpu in gpus:
+        memory_total = gpu.get("memory_total_mb")
+        memory_used = gpu.get("memory_used_mb")
+        memory_used_percent = (
+            100.0 * memory_used / memory_total
+            if memory_total and memory_used is not None
+            else None
+        )
+        device = {
+            **gpu,
+            "memory_used_percent": memory_used_percent,
+            "busy": False,
+        }
+        if (
+            gpu.get("util_percent") is not None
+            and gpu["util_percent"] > utilization_limit
+        ):
+            device["busy"] = True
+            warnings.append(
+                f'GPU {gpu.get("index", "?")} utilization is {gpu["util_percent"]}% '
+                f"(limit {utilization_limit:g}%)"
+            )
+        if (
+            memory_used_percent is not None
+            and memory_used_percent > memory_limit_percent
+        ):
+            device["busy"] = True
+            warnings.append(
+                f'GPU {gpu.get("index", "?")} memory use is {memory_used_percent:.1f}% '
+                f"({memory_used} of {memory_total} MB; limit {memory_limit_percent:g}%)"
+            )
+        devices.append(device)
+
+    return {
+        "available": True,
+        "busy": any(device["busy"] for device in devices),
+        "thresholds": thresholds,
+        "devices": devices,
+        "warnings": warnings,
+    }
+
+
+def summarize_onnxruntime_profile(path):
+    """Summarize node execution providers from an ONNX Runtime JSON trace."""
+    events = json.loads(Path(path).read_text(encoding="utf-8"))
+    event_counts = Counter()
+    unique_nodes = defaultdict(set)
+    operator_counts = defaultdict(Counter)
+    for event in events:
+        if event.get("cat") != "Node":
+            continue
+        args = event.get("args") or {}
+        provider = args.get("provider")
+        if not provider:
+            continue
+        node_name = event.get("name")
+        if not node_name:
+            continue
+        event_counts[provider] += 1
+        unique_nodes[provider].add(node_name)
+        operator = args.get("op_name")
+        if operator:
+            operator_counts[provider][operator] += 1
+
+    if not event_counts:
+        raise ValueError(f"ONNX Runtime profile contains no provider-tagged node events: {path}")
+
+    return {
+        "trace_path": str(Path(path)),
+        "node_execution_event_counts": dict(event_counts),
+        "unique_node_counts_by_provider": {
+            provider: len(names) for provider, names in unique_nodes.items()
+        },
+        "operator_event_counts_by_provider": {
+            provider: dict(counts) for provider, counts in operator_counts.items()
+        },
+    }
 
 
 def set_cpu_affinity(cpus):
