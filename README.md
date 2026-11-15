@@ -313,6 +313,42 @@ measured window for diagnosis, rather than invalidating runs based on idle-core
 averages taken before or after inference. Invalidating conditions are recorded
 in `error_message`; these checks do not imply CUDA execution.
 
+### Set the CPU frequency governor (Linux)
+
+The governor is a system-wide CPU policy setting; the benchmark does not change
+it automatically. Check which governors the CPU driver supports and record the
+current policy before changing it:
+
+```bash
+cpupower frequency-info --governors
+cpupower frequency-info --policy
+```
+
+Set the governor for the benchmark with administrator privileges:
+
+```bash
+sudo cpupower frequency-set --governor performance
+```
+
+To switch back to the energy-saving governor afterward:
+
+```bash
+sudo cpupower frequency-set --governor powersave
+```
+
+Verify the setting on every CPU frequency policy:
+
+```bash
+grep -H . /sys/devices/system/cpu/cpufreq/policy*/scaling_governor
+```
+
+Use only a governor listed by `cpupower frequency-info --governors`. If
+`cpupower` is not installed, install the `cpupower` or `linux-tools` package
+provided by your Linux distribution. `performance` requests a high-performance
+policy and `powersave` requests an energy-saving policy; neither fixes the CPU
+at a specific clock, and hardware, thermal, or power limits can still affect
+frequency. Restore the original governor after benchmarking.
+
 To find a sustainable camera rate, run separate benchmarks at (for example)
 15, 20, 25, and 30 Hz, using a distinct `--results-dir` for each run. Compare
 `input_rate_target_met`, `observed_input_rate_hz`, and `dropped_frames` before
