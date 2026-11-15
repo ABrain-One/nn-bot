@@ -5,8 +5,11 @@ import numpy as np
 from types import SimpleNamespace
 
 from ab.bot.runtime import (
+    CpuTelemetryMonitor,
     device_name,
+    dropped_frame_fraction,
     dropped_frames_between,
+    dropped_frames_within_tolerance,
     get_cpu_affinity,
     header_to_publish_latency_ns,
     l2_normalize,
@@ -73,7 +76,7 @@ class RuntimeTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "no provider-tagged node events"):
                 summarize_onnxruntime_profile(path)
 
-    def test_measurement_conditions_flag_powersave_low_clock_and_high_temperature(self):
+    def test_measurement_conditions_keep_governor_and_temperature_checks(self):
         warnings = measurement_condition_warnings(
             {
                 "scaling_governor": "powersave",
@@ -87,10 +90,35 @@ class RuntimeTests(unittest.TestCase):
             warnings,
             [
                 "CPU scaling governor is powersave",
-                "CPU clock is below 60% of its reported maximum",
                 "Tctl temperature is at least 85 C",
             ],
         )
+
+    def test_system_average_clock_does_not_invalidate_performance_governor_run(self):
+        warnings = measurement_condition_warnings(
+            {
+                "scaling_governor": "performance",
+                "cur_freq_mhz": 1500,
+                "max_freq_mhz": 5050,
+            },
+            None,
+        )
+
+        self.assertEqual(warnings, [])
+
+    def test_cpu_telemetry_monitor_samples_per_core_during_window(self):
+        import time
+
+        monitor = CpuTelemetryMonitor(sampling_interval_seconds=0.01)
+        monitor.start()
+        time.sleep(0.04)
+        report = monitor.stop_and_report()
+
+        self.assertGreaterEqual(report["sample_count"], 2)
+        self.assertTrue(report["frequency_samples_are_diagnostic_only"])
+        self.assertIsNotNone(report["measurement_window_seconds"])
+        self.assertIsInstance(report["samples"][0]["per_core"], list)
+        self.assertIsNotNone(report["samples"][0]["per_core"][0]["frequency_mhz"])
 
     def test_preprocesses_nchw_input_and_resizes(self):
         image = np.full((4, 6, 3), 255, dtype=np.uint8)
@@ -257,6 +285,11 @@ class RuntimeTests(unittest.TestCase):
     def test_dropped_frames_rejects_non_increasing_timestamps(self):
         with self.assertRaisesRegex(ValueError, "not increasing"):
             dropped_frames_between(100, 100, 30)
+
+    def test_small_estimated_frame_loss_is_reported_but_within_tolerance(self):
+        self.assertAlmostEqual(dropped_frame_fraction(1, 510), 1 / 511)
+        self.assertTrue(dropped_frames_within_tolerance(1, 510))
+        self.assertFalse(dropped_frames_within_tolerance(3, 510))
 
 
 if __name__ == "__main__":

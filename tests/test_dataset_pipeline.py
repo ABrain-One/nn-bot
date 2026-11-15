@@ -3,7 +3,6 @@ import json
 import csv
 import importlib
 from pathlib import Path
-import sys
 from types import SimpleNamespace
 from tempfile import TemporaryDirectory
 import socket
@@ -117,7 +116,7 @@ class DatasetPipelineTests(unittest.TestCase):
 			report_path.write_text(json.dumps({
 				"valid": True,
 				"dataset": args.dataset,
-				"profile_version": 4,
+				"profile_version": 6,
 				"run_complete": True,
 				"onnxruntime_latency_ns": {"avg": 123.0},
 				"performance_measurement_valid": True,
@@ -159,17 +158,31 @@ class DatasetPipelineTests(unittest.TestCase):
 
 		self.assertTrue(args.emulate_camera)
 		self.assertEqual(args.camera_rate_hz, 24.0)
+		from ament_index_python.packages import get_package_prefix
+
 		self.assertEqual(
 			_camera_emulator_command(args),
 			[
-				sys.executable,
-				"-m",
-				"ab.bot.synthetic_camera",
+				str(Path(get_package_prefix("image_tools")) / "lib" / "image_tools" / "cam2image"),
 				"--ros-args",
+				"--log-level",
+				"WARN",
 				"-p",
-				"image_topic:=/camera/image_raw",
+				"burger_mode:=true",
 				"-p",
-				"publish_rate_hz:=24.0",
+				"frequency:=24.0",
+				"-p",
+				"reliability:=reliable",
+				"-p",
+				"history:=keep_last",
+				"-p",
+				"depth:=5",
+				"-p",
+				"width:=640",
+				"-p",
+				"height:=480",
+				"-r",
+				"/image:=/camera/image_raw",
 			],
 		)
 
@@ -420,7 +433,10 @@ class DatasetPipelineTests(unittest.TestCase):
 			path.write_text(json.dumps(record))
 			self.assertFalse(_merge_profile("AirNet", args, profile))
 			record = json.loads(path.read_text())
-			self.assertIn("5 synthetic camera frame(s) were dropped", record["error_message"])
+			self.assertIn(
+				"5 estimated synthetic camera frame(s) exceeded the 0.500% loss tolerance",
+				record["error_message"],
+			)
 			self.assertFalse(nn_stat_csv.exists())
 			record.update(
 				{

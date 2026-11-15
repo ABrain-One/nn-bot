@@ -26,6 +26,7 @@ from ab.bot.runtime import (
     CAMERA_DATA_TIMEOUT_EXIT_CODE,
     PREPROCESSING_MANIFEST_VERSION,
     assess_gpu_load,
+    dropped_frames_within_tolerance,
     get_cpu_affinity,
     measurement_condition_warnings,
     sample_cpu_frequencies,
@@ -634,15 +635,39 @@ def _inference_command():
 
 
 def _camera_emulator_command(args):
+    from ament_index_python.packages import get_package_prefix
+
+    camera_executable = (
+        Path(get_package_prefix("image_tools"))
+        / "lib"
+        / "image_tools"
+        / "cam2image"
+    )
+    if not camera_executable.is_file():
+        raise FileNotFoundError(
+            f"Native ROS image publisher not found: {camera_executable}"
+        )
     return [
-        sys.executable,
-        "-m",
-        "ab.bot.synthetic_camera",
+        str(camera_executable),
         "--ros-args",
+        "--log-level",
+        "WARN",
         "-p",
-        f"image_topic:={args.input_topic}",
+        "burger_mode:=true",
         "-p",
-        f"publish_rate_hz:={args.camera_rate_hz}",
+        f"frequency:={args.camera_rate_hz}",
+        "-p",
+        "reliability:=reliable",
+        "-p",
+        "history:=keep_last",
+        "-p",
+        "depth:=5",
+        "-p",
+        "width:=640",
+        "-p",
+        "height:=480",
+        "-r",
+        f"/image:={args.input_topic}",
     ]
 
 
@@ -667,7 +692,7 @@ def _has_complete_record(model_name, args):
     return (
         record.get("valid") is True
         and record.get("dataset") == args.dataset
-        and record.get("profile_version") == 4
+        and record.get("profile_version") == 6
         and record.get("run_complete") is True
         and record.get("performance_measurement_valid") is True
         and record.get("inference_correctness_valid") is True
@@ -716,7 +741,7 @@ def _merge_profile(model_name, args, profile):
         record[field] = profile[field]
     record["gpu_backend"] = "PyTorch CUDA" if profile["gpu_runs"] else None
     record["cpu_backend"] = "PyTorch CPU"
-    record["profile_version"] = 4
+    record["profile_version"] = 6
     analytics.update(profile["device_analytics"])
     analytics["onnxruntime_version"] = ort_version
     analytics["onnxruntime_providers"] = ort_providers
@@ -816,9 +841,15 @@ def _merge_profile(model_name, args, profile):
                 f"{label} GPU preflight detected a busy GPU"
             )
     if record.get("synthetic_input") and record.get("dropped_frames", 0):
-        measurement_quality_errors.append(
-            f'{record["dropped_frames"]} synthetic camera frame(s) were dropped'
-        )
+        received_frames = record.get("arrival_frame_count", record.get("iterations", 0))
+        if not dropped_frames_within_tolerance(
+            record["dropped_frames"], received_frames
+        ):
+            measurement_quality_errors.append(
+                f'{record["dropped_frames"]} estimated synthetic camera frame(s) '
+                f'exceeded the {record.get("dropped_frame_tolerance_fraction", 0.005):.3%} '
+                "loss tolerance"
+            )
     condition_warnings = measurement_condition_warnings(
         record.get("device_analytics", {}).get("cpu_info", {}).get("cpu_frequencies"),
         record.get("device_analytics", {}).get("cpu_info", {}).get("temperatures"),

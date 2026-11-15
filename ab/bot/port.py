@@ -22,9 +22,13 @@ from std_msgs.msg import Bool, Float32MultiArray, MultiArrayDimension
 
 from ab.bot.runtime import (
     CAMERA_DATA_TIMEOUT_EXIT_CODE,
+    CpuTelemetryMonitor,
+    DROPPED_FRAME_TOLERANCE_FRACTION,
     assess_gpu_load,
     device_name,
+    dropped_frame_fraction,
     dropped_frames_between,
+    dropped_frames_within_tolerance,
     get_cpu_affinity,
     header_to_publish_latency_ns,
     load_preprocessing_manifest,
@@ -246,6 +250,7 @@ class InferenceNode(Node):
         self.previous_synthetic_stamp_ns = None
         self.dropped_frames = 0
         self.arrival_timestamps_ns = []
+        self.cpu_telemetry_monitor = CpuTelemetryMonitor()
         self.failed_frames = 0
         self.last_frame_error = None
         self.record_saved = False
@@ -256,12 +261,16 @@ class InferenceNode(Node):
         self.output_publisher = self.create_publisher(
             Float32MultiArray, str(self.get_parameter("output_topic").value), 10
         )
-        # Keep only the newest pending camera frame. This limits stale backlog when
-        # an external camera is already publishing while the model is initialized.
+        # Reliable delivery keeps the local synthetic stream's large image
+        # fragments intact; physical sensor streams retain low-latency best effort.
         image_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
-            depth=1,
-            reliability=ReliabilityPolicy.BEST_EFFORT,
+            depth=5 if self.synthetic_input else 1,
+            reliability=(
+                ReliabilityPolicy.RELIABLE
+                if self.synthetic_input
+                else ReliabilityPolicy.BEST_EFFORT
+            ),
             durability=DurabilityPolicy.VOLATILE,
         )
         self.subscription = self.create_subscription(
@@ -317,6 +326,12 @@ class InferenceNode(Node):
         if self.startup_frames_dropped < self.startup_drop_frames:
             self.startup_frames_dropped += 1
             return
+
+        if (
+            self.completed_warmups >= self.warmup_runs
+            and not self.cpu_telemetry_monitor.started
+        ):
+            self.cpu_telemetry_monitor.start()
 
         callback_started_ns = time.perf_counter_ns()
         arrival_ros_ns = self.get_clock().now().nanoseconds
@@ -417,6 +432,7 @@ class InferenceNode(Node):
         deadline_ms = float(self.get_parameter("deadline_ms").value)
         deadline_ns = int(round(deadline_ms * 1_000_000))
         deadline_missed_frames = int(sum(1 for lat in self.latencies_ns if lat > deadline_ns))
+        cpu_telemetry = self.cpu_telemetry_monitor.stop_and_report()
         cpu_frequencies = sample_cpu_frequencies()
         temperatures = sample_temperatures()
         cpu_frequencies_before = self.cpu_frequencies_before
@@ -431,6 +447,18 @@ class InferenceNode(Node):
             else None
         )
         dropped_frames = self.dropped_frames if self.synthetic_input else None
+        dropped_frame_fraction_value = (
+            dropped_frame_fraction(dropped_frames, len(self.arrival_timestamps_ns))
+            if self.synthetic_input
+            else None
+        )
+        dropped_frame_tolerance_met = (
+            dropped_frames_within_tolerance(
+                dropped_frames, len(self.arrival_timestamps_ns)
+            )
+            if self.synthetic_input
+            else None
+        )
         measurement_quality_errors = []
         if self.failed_frames:
             measurement_quality_errors.append(
@@ -445,9 +473,11 @@ class InferenceNode(Node):
             measurement_quality_errors.append(
                 f"collected {len(self.latencies_ns)} of {self.iterations} requested inference samples"
             )
-        if dropped_frames:
+        if dropped_frames and not dropped_frame_tolerance_met:
             measurement_quality_errors.append(
-                f"{dropped_frames} synthetic camera frame(s) were dropped"
+                f"{dropped_frames} estimated synthetic camera frame(s) were dropped "
+                f"({dropped_frame_fraction_value:.3%}; tolerance "
+                f"{DROPPED_FRAME_TOLERANCE_FRACTION:.3%})"
             )
         input_rate_met = (
             not self.synthetic_input
@@ -490,7 +520,7 @@ class InferenceNode(Node):
             "architecture": platform.machine(),
             "os_version": platform.platform(),
             "valid": False,
-            "profile_version": 4,
+            "profile_version": 6,
             "run_complete": (
                 len(self.latencies_ns) == self.iterations and self.failed_frames == 0
             ),
@@ -512,6 +542,11 @@ class InferenceNode(Node):
             "observed_input_rate_hz": observed_input_rate_hz,
             "input_rate_target_met": input_rate_met,
             "input_rate_tolerance_fraction": 0.95,
+            "dropped_frame_fraction": dropped_frame_fraction_value,
+            "dropped_frame_tolerance_fraction": (
+                DROPPED_FRAME_TOLERANCE_FRACTION if self.synthetic_input else None
+            ),
+            "dropped_frame_tolerance_met": dropped_frame_tolerance_met,
             "iterations": self.iterations,
             "startup_drop_frames": self.startup_drop_frames,
             "startup_frames_dropped": self.startup_frames_dropped,
@@ -521,6 +556,7 @@ class InferenceNode(Node):
             "clock_inconsistency_frames": self.clock_inconsistency_frames,
             "clock_error_message": self.clock_error_message,
             "dropped_frames": dropped_frames,
+            "arrival_frame_count": len(self.arrival_timestamps_ns),
             "last_frame_error": self.last_frame_error,
             "error_message": "; ".join(performance_quality_errors)
             or "Inference correctness validation has not run",
@@ -610,6 +646,7 @@ class InferenceNode(Node):
                 "cpu_frequencies_before": cpu_frequencies_before,
                 "temperatures": temperatures,
                 "temperatures_before": temperatures_before,
+                "cpu_telemetry": cpu_telemetry,
                 "onnxruntime_version": ort.__version__,
                 "onnx_num_threads": int(self.get_parameter("onnx_num_threads").value) or None,
                 "providers": self.session.get_providers(),

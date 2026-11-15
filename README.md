@@ -130,7 +130,10 @@ comparable, and at least one tested backend passes correctness checks.
 
 To ensure controlled measurement conditions:
 - **CPU Pinning**: Pin the process to a specific core using `cpu_affinity` (e.g. `-p cpu_affinity:=0`).
-- **Fixed Clocks**: CPU scaling governors and frequencies are monitored and logged in `device_analytics.cpu_frequencies`.
+- **CPU telemetry**: Governor and temperature checks are retained. Per-core
+  frequency and utilization are sampled during timed image processing and
+  reported under `device_analytics.cpu_telemetry`; a single system-average
+  before/after clock snapshot is descriptive only and does not invalidate a run.
 - **ONNX Thread Limit**: ONNX Runtime intra-op threads are constrained via `onnx_num_threads` (default: 1) to avoid unconstrained thread contention.
 - **Temperature Logging**: System and GPU temperatures are sampled and logged in `device_analytics.temperatures`.
 - **Event-Driven Execution**: Node execution uses blocking `spin()` instead of polling `spin_once(0.1)` in a tight loop.
@@ -253,8 +256,9 @@ The ROS node measures 500 image-message inferences after 10 warm-ups by default
 publishing the L2-normalized model output, reporting `p99`, `max`, and
 `deadline_missed_frames` against the configured deadline (default: 33 ms at 30 Hz).
 For a reproducible ROS image-stream emulation,
-add `--emulate-camera`; the pipeline starts a separate ROS 2 publisher that
-sends stamped 640x480 RGB test frames at 30 Hz by default. Set
+add `--emulate-camera`; the pipeline starts the native `image_tools/cam2image`
+publisher in burger-pattern mode to send stamped 640x480 RGB test frames at
+30 Hz by default. Set
 `--camera-rate-hz` to change the rate. For example:
 
 ```bash
@@ -289,15 +293,25 @@ physical camera runs record `synthetic_input: false`. These figures measure
 the host and ROS path under the configured synthetic stream, not camera optics,
 sensor acquisition, or the physical robot's environment.
 
-The synthetic publisher generates a new frame each tick and uses
-`SensorDataQoS` (best-effort). Its `dropped_frames` count estimates missed
+The native synthetic publisher is used to avoid the Python serialization
+throughput limit for 640x480 ROS image messages. It uses the ROS image-tools
+publisher with reliable, keep-last QoS (depth 5), matched by the inference
+subscriber for synthetic streams, and remaps its `/image` topic to the
+configured input topic. Physical-camera subscriptions retain best-effort QoS.
+Its
+`dropped_frames` count estimates missed
 synthetic camera frames from gaps between received source timestamps; it is
 `null` for physical-camera runs, where the source frame rate is not configured.
-Synthetic runs with dropped frames are invalid, as are runs whose GPU preflight
+Synthetic runs allow up to 0.5% estimated timestamp-derived frame loss, provided
+the requested input-rate target is still met; larger losses invalidate the run.
+The estimated loss fraction and tolerance are recorded with the raw drop count.
+Runs whose GPU preflight
 exceeds configured utilization or memory limits. CPU timing runs are invalidated
-when the captured governor is `powersave`, the reported clock is below 60% of its
-maximum, or a sampled temperature is at least 85 C. Invalidating conditions are
-recorded in `error_message`; these checks do not imply CUDA execution.
+when the captured governor is `powersave` or a sampled temperature is at least
+85 C. Per-core frequency and utilization samples are collected during the
+measured window for diagnosis, rather than invalidating runs based on idle-core
+averages taken before or after inference. Invalidating conditions are recorded
+in `error_message`; these checks do not imply CUDA execution.
 
 To find a sustainable camera rate, run separate benchmarks at (for example)
 15, 20, 25, and 30 Hz, using a distinct `--results-dir` for each run. Compare

@@ -6,6 +6,8 @@ import os
 import platform
 import shutil
 import subprocess
+import threading
+import time
 from collections import Counter, defaultdict
 from pathlib import Path
 
@@ -14,6 +16,7 @@ import numpy as np
 
 CAMERA_DATA_TIMEOUT_EXIT_CODE = 75
 PREPROCESSING_MANIFEST_VERSION = 1
+DROPPED_FRAME_TOLERANCE_FRACTION = 0.005
 
 
 def _input_layout(shape):
@@ -340,6 +343,22 @@ def dropped_frames_between(previous_stamp_ns, current_stamp_ns, frame_rate_hz):
     return expected_intervals - 1
 
 
+def dropped_frame_fraction(dropped_frames, received_frames):
+    """Estimate the missing-frame fraction over received plus inferred frames."""
+    if dropped_frames < 0 or received_frames < 0:
+        raise ValueError("Frame counts cannot be negative")
+    total_frames = dropped_frames + received_frames
+    return dropped_frames / total_frames if total_frames else 0.0
+
+
+def dropped_frames_within_tolerance(dropped_frames, received_frames):
+    """Allow only small timestamp-derived loss while separately checking input rate."""
+    return (
+        dropped_frame_fraction(dropped_frames, received_frames)
+        <= DROPPED_FRAME_TOLERANCE_FRACTION
+    )
+
+
 def sample_temperatures():
     """Capture CPU, GPU, and system temperatures in Celsius when available."""
     temps = {}
@@ -395,22 +414,132 @@ def sample_cpu_frequencies():
     return info or None
 
 
+class CpuTelemetryMonitor:
+    """Sample per-core CPU utilization and frequency during a measured window."""
+
+    def __init__(self, sampling_interval_seconds=1.0):
+        if not math.isfinite(sampling_interval_seconds) or sampling_interval_seconds <= 0:
+            raise ValueError("sampling_interval_seconds must be finite and positive")
+        self.sampling_interval_seconds = float(sampling_interval_seconds)
+        self._stop_event = threading.Event()
+        self._samples_lock = threading.Lock()
+        self._samples = []
+        self._sampling_errors = []
+        self._started_at = None
+        self._process = None
+        self._thread = None
+        self._psutil = None
+
+    @property
+    def started(self):
+        return self._thread is not None
+
+    def start(self):
+        if self.started:
+            raise RuntimeError("CPU telemetry monitor has already started")
+        import psutil
+
+        self._psutil = psutil
+        self._process = psutil.Process()
+        psutil.cpu_percent(interval=None, percpu=True)
+        self._process.cpu_percent(interval=None)
+        self._started_at = time.monotonic()
+        self._capture_sample(include_utilization=False)
+        self._thread = threading.Thread(
+            target=self._sample_loop,
+            name="cpu-telemetry-monitor",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def _capture_sample(self, include_utilization):
+        psutil = self._psutil
+        frequencies = psutil.cpu_freq(percpu=True) or []
+        cpu_utilization = (
+            psutil.cpu_percent(interval=None, percpu=True)
+            if include_utilization
+            else []
+        )
+        process_utilization = (
+            self._process.cpu_percent(interval=None)
+            if include_utilization
+            else None
+        )
+        per_core = []
+        for index, frequency in enumerate(frequencies):
+            current = frequency.current
+            maximum = frequency.max
+            if (
+                isinstance(current, (int, float))
+                and isinstance(maximum, (int, float))
+                and maximum >= 1000
+                and 0 < current < 100
+            ):
+                current *= 1000
+            per_core.append(
+                {
+                    "cpu": index,
+                    "utilization_percent": (
+                        cpu_utilization[index]
+                        if index < len(cpu_utilization)
+                        else None
+                    ),
+                    "frequency_mhz": current,
+                    "min_frequency_mhz": frequency.min,
+                    "max_frequency_mhz": maximum,
+                }
+            )
+        sample = {
+            "elapsed_seconds": time.monotonic() - self._started_at,
+            "process_cpu_percent": process_utilization,
+            "per_core": per_core,
+        }
+        with self._samples_lock:
+            self._samples.append(sample)
+
+    def _sample_loop(self):
+        while not self._stop_event.wait(self.sampling_interval_seconds):
+            try:
+                self._capture_sample(include_utilization=True)
+            except (self._psutil.Error, OSError) as error:
+                with self._samples_lock:
+                    self._sampling_errors.append(
+                        f"{type(error).__name__}: {error}"
+                    )
+
+    def stop_and_report(self):
+        if self._thread is None:
+            return {
+                "sampling_interval_seconds": self.sampling_interval_seconds,
+                "sample_count": 0,
+                "samples": [],
+                "sampling_errors": [],
+            }
+        self._stop_event.set()
+        self._thread.join(timeout=self.sampling_interval_seconds + 1.0)
+        if self._thread.is_alive():
+            raise RuntimeError("CPU telemetry monitor did not stop")
+        with self._samples_lock:
+            samples = list(self._samples)
+            sampling_errors = list(self._sampling_errors)
+        return {
+            "sampling_interval_seconds": self.sampling_interval_seconds,
+            "sample_count": len(samples),
+            "measurement_window_seconds": (
+                time.monotonic() - self._started_at
+            ),
+            "frequency_samples_are_diagnostic_only": True,
+            "samples": samples,
+            "sampling_errors": sampling_errors,
+        }
+
+
 def measurement_condition_warnings(cpu_frequencies, temperatures):
     """Report CPU conditions that make inference timings difficult to compare."""
     warnings = []
     governor = (cpu_frequencies or {}).get("scaling_governor")
     if governor == "powersave":
         warnings.append("CPU scaling governor is powersave")
-
-    current = (cpu_frequencies or {}).get("cur_freq_mhz")
-    maximum = (cpu_frequencies or {}).get("max_freq_mhz")
-    if (
-        isinstance(current, (int, float))
-        and isinstance(maximum, (int, float))
-        and maximum > 0
-        and current / maximum < 0.6
-    ):
-        warnings.append("CPU clock is below 60% of its reported maximum")
 
     for sensor, entries in (temperatures or {}).items():
         for entry in entries:
