@@ -1,2 +1,0 @@
-task,dataset,epoch,metric,accuracy,duration,nn,accuracy_source,duration_unit,duration_source
-img-classification,cifar-10,50,acc,0.8657,0.000417763094,AirNet,checkpoint_training_accuracy,seconds_per_inference,session_run_only

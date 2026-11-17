@@ -18,6 +18,7 @@ from ab.bot.runtime import (
     measurement_condition_warnings,
     preprocess_image,
     process_model_output,
+    resolve_onnx_providers,
     sample_cpu_frequencies,
     sample_temperatures,
     set_cpu_affinity,
@@ -28,6 +29,32 @@ from ab.bot.runtime import (
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_resolves_strict_onnx_cpu_and_cuda_provider_modes(self):
+        available = ["CUDAExecutionProvider", "CPUExecutionProvider"]
+
+        self.assertEqual(
+            resolve_onnx_providers("cpu", available),
+            ["CPUExecutionProvider"],
+        )
+        self.assertEqual(
+            resolve_onnx_providers("cuda", available),
+            ["CUDAExecutionProvider"],
+        )
+
+    def test_onnx_provider_mode_fails_when_requested_device_is_unavailable(self):
+        with self.assertRaisesRegex(RuntimeError, "CUDAExecutionProvider is unavailable"):
+            resolve_onnx_providers("cuda", ["CPUExecutionProvider"])
+
+    def test_auto_onnx_provider_mode_keeps_configured_priority(self):
+        self.assertEqual(
+            resolve_onnx_providers(
+                "auto",
+                ["CPUExecutionProvider"],
+                ["CUDAExecutionProvider", "CPUExecutionProvider"],
+            ),
+            ["CPUExecutionProvider"],
+        )
+
     def test_summarizes_onnx_node_execution_providers(self):
         import json
         from pathlib import Path

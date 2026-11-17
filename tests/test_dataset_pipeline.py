@@ -116,7 +116,8 @@ class DatasetPipelineTests(unittest.TestCase):
 			report_path.write_text(json.dumps({
 				"valid": True,
 				"dataset": args.dataset,
-				"profile_version": 6,
+				"profile_version": 7,
+				"onnxruntime_execution_mode": "auto",
 				"run_complete": True,
 				"onnxruntime_latency_ns": {"avg": 123.0},
 				"performance_measurement_valid": True,
@@ -128,6 +129,9 @@ class DatasetPipelineTests(unittest.TestCase):
 
 			self.assertTrue(_has_complete_record("AirNet", args))
 			record = json.loads(report_path.read_text())
+			args.onnx_provider = "cpu"
+			self.assertFalse(_has_complete_record("AirNet", args))
+			args.onnx_provider = "auto"
 			record.pop("onnxruntime_latency_ns")
 			report_path.write_text(json.dumps(record))
 			self.assertFalse(_has_complete_record("AirNet", args))
@@ -152,6 +156,13 @@ class DatasetPipelineTests(unittest.TestCase):
 		args = parser().parse_args(["--model", "AirNet", "--enable-onnx-profiling"])
 
 		self.assertTrue(args.enable_onnx_profiling)
+
+	def test_cli_selects_strict_onnx_cpu_or_cuda_provider(self):
+		cpu = parser().parse_args(["--model", "AirNet", "--onnx-provider", "cpu"])
+		cuda = parser().parse_args(["--model", "AirNet", "--onnx-provider", "cuda"])
+
+		self.assertEqual(cpu.onnx_provider, "cpu")
+		self.assertEqual(cuda.onnx_provider, "cuda")
 
 	def test_cli_supports_camera_emulation_and_rate(self):
 		args = parser().parse_args(["--model", "AirNet", "--emulate-camera", "--camera-rate-hz", "24"])
@@ -325,6 +336,10 @@ class DatasetPipelineTests(unittest.TestCase):
 			self.assertEqual(record["cpu_duration"], 200)
 			self.assertEqual(record["cpu_p99_duration"], 209)
 			self.assertEqual(record["gpu_duration"], 100)
+			self.assertEqual(record["pytorch_cpu_runs"], 20)
+			self.assertEqual(record["pytorch_cuda_runs"], 20)
+			self.assertEqual(record["pytorch_cpu_backend"], "PyTorch CPU")
+			self.assertEqual(record["pytorch_cuda_backend"], "PyTorch CUDA")
 			self.assertEqual(record["gpu_p95_duration"], 105)
 			self.assertEqual(record["gpu_p99_duration"], 105)
 			self.assertIsNone(record["npu_duration"])
@@ -406,6 +421,20 @@ class DatasetPipelineTests(unittest.TestCase):
 				record["onnxruntime_active_providers"],
 				["CUDAExecutionProvider", "CPUExecutionProvider"],
 			)
+			record["onnxruntime_execution_mode"] = "cuda"
+			record["onnxruntime_requested_providers"] = ["CUDAExecutionProvider"]
+			path.write_text(json.dumps(record))
+			self.assertTrue(_merge_profile("AirNet", args, profile))
+			record = json.loads(path.read_text())
+			self.assertEqual(
+				record["onnxruntime_provider"], "CUDAExecutionProvider"
+			)
+			self.assertEqual(
+				record["onnxruntime_provider_status"],
+				"strict CUDA execution; CPU EP fallback disabled",
+			)
+			record["onnxruntime_execution_mode"] = "auto"
+			path.write_text(json.dumps(record))
 
 			record.pop("nn_stat")
 			path.write_text(json.dumps(record))

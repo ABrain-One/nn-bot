@@ -692,7 +692,9 @@ def _has_complete_record(model_name, args):
     return (
         record.get("valid") is True
         and record.get("dataset") == args.dataset
-        and record.get("profile_version") == 6
+        and record.get("profile_version") == 7
+        and record.get("onnxruntime_execution_mode", "auto")
+        == getattr(args, "onnx_provider", "auto")
         and record.get("run_complete") is True
         and record.get("performance_measurement_valid") is True
         and record.get("inference_correctness_valid") is True
@@ -713,12 +715,28 @@ def _merge_profile(model_name, args, profile):
     ort_providers = analytics.get("providers")
     ort_timestamp = analytics.get("timestamp")
     ort_providers = list(ort_providers or [])
-    ort_provider = ort_providers[0] if len(ort_providers) == 1 else None
+    execution_mode = record.get("onnxruntime_execution_mode", "auto")
+    expected_provider = {
+        "cpu": "CPUExecutionProvider",
+        "cuda": "CUDAExecutionProvider",
+    }.get(execution_mode)
+    if expected_provider and expected_provider in ort_providers:
+        ort_provider = expected_provider
+        provider_status = (
+            "strict CUDA execution; CPU EP fallback disabled"
+            if execution_mode == "cuda"
+            else "strict CPU-only session"
+        )
+    else:
+        ort_provider = ort_providers[0] if len(ort_providers) == 1 else None
+        provider_status = (
+            "active session providers; per-node execution provider not measured"
+        )
     record["onnxruntime_provider"] = ort_provider
+    record["onnxruntime_execution_mode"] = execution_mode
+    record.setdefault("onnxruntime_requested_providers", ort_providers)
     record["onnxruntime_active_providers"] = ort_providers
-    record["onnxruntime_provider_status"] = (
-        "active session providers; per-node execution provider not measured"
-    )
+    record["onnxruntime_provider_status"] = provider_status
     record["runtime"] = "PyTorch and ONNX Runtime"
     for field in (
         "cpu_duration", "cpu_min_duration", "cpu_max_duration", "cpu_median_duration",
@@ -741,7 +759,13 @@ def _merge_profile(model_name, args, profile):
         record[field] = profile[field]
     record["gpu_backend"] = "PyTorch CUDA" if profile["gpu_runs"] else None
     record["cpu_backend"] = "PyTorch CPU"
-    record["profile_version"] = 6
+    record["pytorch_cpu_runs"] = profile["cpu_runs"]
+    record["pytorch_cuda_runs"] = profile["gpu_runs"]
+    record["pytorch_cpu_backend"] = "PyTorch CPU"
+    record["pytorch_cuda_backend"] = (
+        "PyTorch CUDA" if profile["gpu_runs"] else None
+    )
+    record["profile_version"] = 7
     analytics.update(profile["device_analytics"])
     analytics["onnxruntime_version"] = ort_version
     analytics["onnxruntime_providers"] = ort_providers
@@ -1005,6 +1029,7 @@ def _run_model(model_path, model_name, args):
         "deadline_ms": args.deadline_ms,
         "cpu_affinity": args.cpu_affinity if args.cpu_affinity is not None else -1,
         "onnx_num_threads": args.onnx_num_threads,
+        "onnx_execution_mode": args.onnx_provider,
         "gpu_utilization_limit": args.gpu_utilization_limit,
         "gpu_memory_limit_percent": args.gpu_memory_limit_percent,
         "enable_onnx_profiling": args.enable_onnx_profiling,
@@ -1134,6 +1159,15 @@ def parser():
         "--enable-onnx-profiling",
         action="store_true",
         help="Capture an ONNX Runtime per-node provider trace; latency results are diagnostic only",
+    )
+    ap.add_argument(
+        "--onnx-provider",
+        choices=("auto", "cpu", "cuda"),
+        default="auto",
+        help=(
+            "ONNX Runtime execution mode: auto uses configured providers; cpu selects "
+            "CPU only; cuda disables CPU fallback"
+        ),
     )
     ap.add_argument("--onnx-dir", type=Path, default=Path("_work/onnx"))
     ap.add_argument("--results-dir", type=Path, default=Path("stats"))

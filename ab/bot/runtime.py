@@ -19,6 +19,39 @@ PREPROCESSING_MANIFEST_VERSION = 1
 DROPPED_FRAME_TOLERANCE_FRACTION = 0.005
 
 
+def resolve_onnx_providers(mode, available_providers, configured_providers=None):
+    """Choose ONNX Runtime providers for automatic, CPU-only, or CUDA-only runs."""
+    if mode == "cpu":
+        required_provider = "CPUExecutionProvider"
+        requested = [required_provider]
+    elif mode == "cuda":
+        required_provider = "CUDAExecutionProvider"
+        requested = [required_provider]
+    elif mode == "auto":
+        requested = list(
+            configured_providers
+            if configured_providers is not None
+            else ("CUDAExecutionProvider", "CPUExecutionProvider")
+        )
+        required_provider = None
+    else:
+        raise ValueError("ONNX execution mode must be 'auto', 'cpu', or 'cuda'")
+
+    available = set(available_providers)
+    if required_provider is not None and required_provider not in available:
+        raise RuntimeError(
+            f"Requested ONNX Runtime provider {required_provider} is unavailable; "
+            f"available providers: {sorted(available)}"
+        )
+    providers = [provider for provider in requested if provider in available]
+    if not providers:
+        raise RuntimeError(
+            f"None of the requested ONNX Runtime providers are available: "
+            f"{requested}; available: {sorted(available)}"
+        )
+    return providers
+
+
 def _input_layout(shape):
     if len(shape) != 4 or shape[0] not in (1, "batch", None):
         raise ValueError(f"Expected a batch-one rank-4 model input, got {shape}")

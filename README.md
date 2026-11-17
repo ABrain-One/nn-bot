@@ -103,10 +103,40 @@ values. Benchmark records identify the selected output normalization and the
 preprocessing manifest or legacy parameters used.
 
 Results are written to
-`stats/<model>/robot_<dataset>_<hostname>.json` by default. Select an execution
-provider with the `providers` parameter, for example
-`-p providers:="[CUDAExecutionProvider, CPUExecutionProvider]"` when supported
-by the installed ONNX Runtime build.
+`stats/<model>/robot_<dataset>_<hostname>.json` by default. Use
+`--onnx-provider cpu` or `--onnx-provider cuda` to run a strict ONNX Runtime
+CPU-only or CUDA-only session. CUDA mode disables CPU execution-provider
+fallback; a CPU run selects only the CPU provider. A CUDA run fails rather than
+silently using CPU if CUDA is unavailable or cannot execute the model. The
+default `auto` mode keeps CUDA-then-CPU provider behavior. ONNX Runtime may still
+list its CPU provider in `onnxruntime_active_providers` as a registered provider
+in strict CUDA mode; the mode disables CPU fallback for graph execution.
+
+Run CPU and CUDA comparisons into separate result directories so one does not
+overwrite the other:
+
+```bash
+python -m ab.bot.dataset_pipeline --model AirNet --dataset cifar-10 \
+	--emulate-camera --onnx-provider cpu --results-dir _work/provider-runs/cpu
+
+python -m ab.bot.dataset_pipeline --model AirNet --dataset cifar-10 \
+	--emulate-camera --onnx-provider cuda --results-dir _work/provider-runs/cuda
+```
+
+In the JSON, `onnxruntime_execution_mode`, `onnxruntime_requested_providers`,
+`onnxruntime_active_providers`, and `onnxruntime_provider` describe the ROS
+node's ONNX Runtime session. In strict CUDA mode `onnxruntime_provider` is
+CUDA even if the active-provider list also includes CPU; `onnxruntime_profile`
+is the per-node evidence for diagnostic runs. `onnxruntime_latency_ns` measures
+that selected session's `session.run()` time. The separate `pytorch_cpu_*` and
+`pytorch_cuda_*` fields describe PyTorch correctness/validation runs; legacy
+`cpu_runs` and `gpu_runs` are aliases for those PyTorch runs and are not counts
+of ROS ONNX Runtime executions.
+
+Use `--enable-onnx-profiling` in a separate diagnostic run to inspect actual
+per-node execution-provider events. Profiling adds overhead, so its latency
+samples are diagnostic only. With `auto`, a trace may show nodes split between
+CUDA and CPU; strict `cpu`/`cuda` modes should show only the selected provider.
 
 The standalone ONNX node's primary `latency_ns` measures image conversion and
 preprocessing through ONNX inference and publishing that output, including any
@@ -144,9 +174,10 @@ can be merged with that schema. NPU fields (`npu_duration`, `npu_min_duration`,
 `npu_max_duration`, `npu_std_dev`, `npu_runs`, `npu_error`) are included in the
 schema for compatibility. `unit` identifies the host hardware.
 `onnxruntime_active_providers` lists the active ONNX Runtime session providers.
-`onnxruntime_provider` is populated only for a single-provider session; with
-multiple providers, per-node execution is unverified. A requested or active CUDA
-provider does not prove that CUDA executed every model node.
+`onnxruntime_provider` identifies the selected provider in strict CPU/CUDA mode,
+or a single-provider auto session. In mixed-provider auto mode, per-node
+execution is unverified unless profiling is enabled. A requested or active
+CUDA provider alone does not prove that CUDA executed every model node.
 
 For a separate diagnostic run, pass `--enable-onnx-profiling` to save an
 ONNX Runtime trace and summarize per-node event counts, unique nodes, and

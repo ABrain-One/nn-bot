@@ -36,6 +36,7 @@ from ab.bot.runtime import (
     measurement_condition_warnings,
     preprocess_image,
     process_model_output,
+    resolve_onnx_providers,
     sample_cpu_frequencies,
     sample_gpus,
     sample_temperatures,
@@ -66,6 +67,7 @@ class InferenceNode(Node):
         self.declare_parameter("gpu_utilization_limit", 20.0)
         self.declare_parameter("gpu_memory_limit_percent", 20.0)
         self.declare_parameter("enable_onnx_profiling", False)
+        self.declare_parameter("onnx_execution_mode", "auto")
         self.declare_parameter("startup_drop_frames", 10)
         self.declare_parameter("ready_topic", "/nn_bot/ready")
         self.declare_parameter("input_scale", 1.0 / 255.0)
@@ -157,14 +159,16 @@ class InferenceNode(Node):
         ):
             raise ValueError("camera_rate_hz must be finite and positive for synthetic input")
 
-        requested_providers = list(self.get_parameter("providers").value)
+        onnx_execution_mode = str(
+            self.get_parameter("onnx_execution_mode").value
+        ).lower()
+        configured_providers = list(self.get_parameter("providers").value)
         available_providers = ort.get_available_providers()
-        providers = [name for name in requested_providers if name in available_providers]
-        if not providers:
-            raise RuntimeError(
-                f"None of the requested ONNX Runtime providers are available: "
-                f"{requested_providers}; available: {available_providers}"
-            )
+        providers = resolve_onnx_providers(
+            onnx_execution_mode,
+            available_providers,
+            configured_providers=configured_providers,
+        )
 
         self.cpu_frequencies_before = sample_cpu_frequencies()
         self.temperatures_before = sample_temperatures()
@@ -190,6 +194,10 @@ class InferenceNode(Node):
             )
             session_options.enable_profiling = True
             session_options.profile_file_prefix = str(profile_prefix)
+        if onnx_execution_mode == "cuda":
+            session_options.add_session_config_entry(
+                "session.disable_cpu_ep_fallback", "1"
+            )
         onnx_num_threads = int(self.get_parameter("onnx_num_threads").value)
         if onnx_num_threads > 0:
             session_options.intra_op_num_threads = onnx_num_threads
@@ -198,6 +206,17 @@ class InferenceNode(Node):
             str(model_path), sess_options=session_options, providers=providers
         )
         active_providers = self.session.get_providers()
+        expected_provider = {
+            "cpu": "CPUExecutionProvider",
+            "cuda": "CUDAExecutionProvider",
+        }.get(onnx_execution_mode)
+        if expected_provider and expected_provider not in active_providers:
+            raise RuntimeError(
+                f"Strict ONNX {onnx_execution_mode.upper()} mode requested "
+                f"{expected_provider}, but the session activated {active_providers}"
+            )
+        self.onnx_execution_mode = onnx_execution_mode
+        self.onnx_requested_providers = providers
         self.gpu_preflight_snapshot = gpu_preflight_snapshot
         self.gpu_preflight = gpu_preflight
         self.onnxruntime_profile_prefix = profile_prefix
@@ -520,7 +539,7 @@ class InferenceNode(Node):
             "architecture": platform.machine(),
             "os_version": platform.platform(),
             "valid": False,
-            "profile_version": 6,
+            "profile_version": 7,
             "run_complete": (
                 len(self.latencies_ns) == self.iterations and self.failed_frames == 0
             ),
@@ -575,13 +594,22 @@ class InferenceNode(Node):
             "unit": device_type,
             "runtime": "ONNX Runtime",
             "onnxruntime_provider": (
-                active_providers[0]
-                if len(active_providers) == 1
+                self.onnx_requested_providers[0]
+                if self.onnx_execution_mode in {"cpu", "cuda"}
+                or len(active_providers) == 1
                 else None
             ),
+            "onnxruntime_execution_mode": self.onnx_execution_mode,
+            "onnxruntime_requested_providers": self.onnx_requested_providers,
             "onnxruntime_active_providers": active_providers,
             "onnxruntime_provider_status": (
-                "active session providers; per-node execution provider not measured"
+                (
+                    "strict CUDA execution; CPU EP fallback disabled"
+                    if self.onnx_execution_mode == "cuda"
+                    else "strict CPU-only session"
+                )
+                if self.onnx_execution_mode in {"cpu", "cuda"}
+                else "active session providers; per-node execution provider not measured"
             ),
             "onnxruntime_profiling_enabled": self.enable_onnx_profiling,
             "onnxruntime_profile": onnxruntime_profile,
