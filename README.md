@@ -20,7 +20,7 @@ nn-bot/
 ├── resource/                    # ROS package index marker
 ├── scripts/                     # Helper scripts, including background runs
 ├── stats/                       # Saved benchmark JSON and NN-Stat CSV records
-│   └── AirNet/provider-comparison/
+│   └── <ModelName>/provider-comparison/
 │       ├── cpu/                 # CPU-only ONNX Runtime benchmark
 │       ├── cuda/                # CUDA-only ONNX Runtime benchmark
 │       └── cuda-diagnostic/     # CUDA node-placement profile and summary

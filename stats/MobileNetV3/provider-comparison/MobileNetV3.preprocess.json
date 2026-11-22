@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "model": "MobileNetV3",
+  "dataset": "cifar-10",
+  "transform": "echo_512",
+  "color_mode": "RGB",
+  "omitted_training_augmentations": [],
+  "operations": [
+    {
+      "type": "resize",
+      "size": [
+        512,
+        512
+      ],
+      "mode": "exact",
+      "interpolation": "bilinear"
+    },
+    {
+      "type": "to_tensor",
+      "scale": 0.00392156862745098
+    }
+  ]
+}

@@ -1,0 +1,217 @@
+{
+  "title": "MobileNetV3 ONNX Runtime CPU vs CUDA ROS benchmarks",
+  "generated_utc": "2026-11-22T15:04:57.735610+00:00",
+  "execution_location": "ROS 2 inference node and synthetic camera ran on the workstation",
+  "model": "MobileNetV3",
+  "dataset": "cifar-10",
+  "preprocessing_manifest": "MobileNetV3.preprocess.json",
+  "shared_settings": {
+    "camera": "native image_tools/cam2image, 640x480 RGB, reliable keep-last depth 5",
+    "requested_rate_hz": 30,
+    "iterations": 500,
+    "warmup_runs": 10,
+    "onnx_num_threads": 1,
+    "cpu_governor": "performance",
+    "gpu": "NVIDIA GeForce RTX 4090",
+    "profiling_enabled_for_timing_runs": false
+  },
+  "cpu_run": {
+    "record": "cpu/MobileNetV3/robot_cifar-10_guest-MS-7E27.json",
+    "valid": true,
+    "execution_mode": "cpu",
+    "requested_providers": [
+      "CPUExecutionProvider"
+    ],
+    "active_providers": [
+      "CPUExecutionProvider"
+    ],
+    "selected_provider": "CPUExecutionProvider",
+    "provider_status": "strict CPU-only session",
+    "profiling_enabled": false,
+    "iterations": 500,
+    "warmup_runs": 10,
+    "requested_camera_rate_hz": 30.0,
+    "observed_camera_rate_hz": 30.30335078753015,
+    "input_rate_target_met": true,
+    "estimated_dropped_frames": 0,
+    "estimated_drop_fraction": 0.0,
+    "drop_tolerance_met": true,
+    "session_run_timing": {
+      "avg_ms": 12.511791318,
+      "median_ms": 12.4920465,
+      "p95_ms": 12.8744165,
+      "p99_ms": 13.093616619999999,
+      "max_ms": 13.99
+    },
+    "full_ros_callback_timing": {
+      "avg_ms": 16.743418446,
+      "median_ms": 16.622865,
+      "p95_ms": 17.379426,
+      "p99_ms": 17.940073809999998,
+      "max_ms": 18.378629
+    },
+    "full_preprocessing_through_publish_timing": {
+      "avg_ms": 16.727797757999998,
+      "median_ms": 16.606885,
+      "p95_ms": 17.364536,
+      "p99_ms": 17.922053809999998,
+      "max_ms": 18.362339
+    },
+    "gpu_preflight_snapshot": {
+      "index": 0,
+      "name": "NVIDIA GeForce RTX 4090",
+      "driver": "580.65.06",
+      "memory_total_mb": 24564,
+      "memory_used_mb": 382,
+      "memory_free_mb": 23677,
+      "util_percent": 0,
+      "temperature_c": 48
+    },
+    "pytorch_cpu_runs": 500,
+    "pytorch_cuda_runs": 0,
+    "pytorch_cuda_error": "CUDA is not available to PyTorch",
+    "measurement_quality_errors": [],
+    "error_message": null
+  },
+  "cuda_valid_run": {
+    "record": "cuda-repeat-2/MobileNetV3/robot_cifar-10_guest-MS-7E27.json",
+    "valid": true,
+    "execution_mode": "cuda",
+    "requested_providers": [
+      "CUDAExecutionProvider"
+    ],
+    "active_providers": [
+      "CUDAExecutionProvider",
+      "CPUExecutionProvider"
+    ],
+    "selected_provider": "CUDAExecutionProvider",
+    "provider_status": "strict CUDA execution; CPU EP fallback disabled",
+    "profiling_enabled": false,
+    "iterations": 500,
+    "warmup_runs": 10,
+    "requested_camera_rate_hz": 30.0,
+    "observed_camera_rate_hz": 30.244137609983568,
+    "input_rate_target_met": true,
+    "estimated_dropped_frames": 1,
+    "estimated_drop_fraction": 0.0019569471624266144,
+    "drop_tolerance_met": true,
+    "session_run_timing": {
+      "avg_ms": 1.14800263,
+      "median_ms": 1.2356075,
+      "p95_ms": 1.27933,
+      "p99_ms": 1.33033351,
+      "max_ms": 1.371293
+    },
+    "full_ros_callback_timing": {
+      "avg_ms": 3.876116682,
+      "median_ms": 4.011878,
+      "p95_ms": 4.1203895,
+      "p99_ms": 4.215577,
+      "max_ms": 4.397539
+    },
+    "full_preprocessing_through_publish_timing": {
+      "avg_ms": 3.851072972,
+      "median_ms": 3.980618,
+      "p95_ms": 4.08972105,
+      "p99_ms": 4.1860344,
+      "max_ms": 4.367459
+    },
+    "gpu_preflight_snapshot": {
+      "index": 0,
+      "name": "NVIDIA GeForce RTX 4090",
+      "driver": "580.65.06",
+      "memory_total_mb": 24564,
+      "memory_used_mb": 382,
+      "memory_free_mb": 23677,
+      "util_percent": 0,
+      "temperature_c": 51
+    },
+    "pytorch_cpu_runs": 500,
+    "pytorch_cuda_runs": 0,
+    "pytorch_cuda_error": "CUDA is not available to PyTorch",
+    "measurement_quality_errors": [],
+    "error_message": null
+  },
+  "cuda_initial_invalid_run": {
+    "record": "cuda/MobileNetV3/robot_cifar-10_guest-MS-7E27.json",
+    "valid": false,
+    "execution_mode": "cuda",
+    "requested_providers": [
+      "CUDAExecutionProvider"
+    ],
+    "active_providers": [
+      "CUDAExecutionProvider",
+      "CPUExecutionProvider"
+    ],
+    "selected_provider": "CUDAExecutionProvider",
+    "provider_status": "strict CUDA execution; CPU EP fallback disabled",
+    "profiling_enabled": false,
+    "iterations": 500,
+    "warmup_runs": 10,
+    "requested_camera_rate_hz": 30.0,
+    "observed_camera_rate_hz": 30.068111909238954,
+    "input_rate_target_met": true,
+    "estimated_dropped_frames": 4,
+    "estimated_drop_fraction": 0.007782101167315175,
+    "drop_tolerance_met": false,
+    "session_run_timing": {
+      "avg_ms": 1.141415866,
+      "median_ms": 1.2143575,
+      "p95_ms": 1.26988905,
+      "p99_ms": 1.3246211099999996,
+      "max_ms": 3.096386
+    },
+    "full_ros_callback_timing": {
+      "avg_ms": 3.87007506,
+      "median_ms": 3.972248,
+      "p95_ms": 4.1097405,
+      "p99_ms": 5.04250011,
+      "max_ms": 7.714157
+    },
+    "full_preprocessing_through_publish_timing": {
+      "avg_ms": 3.847324108,
+      "median_ms": 3.944338,
+      "p95_ms": 4.079508,
+      "p99_ms": 5.02772781,
+      "max_ms": 7.697016
+    },
+    "gpu_preflight_snapshot": {
+      "index": 0,
+      "name": "NVIDIA GeForce RTX 4090",
+      "driver": "580.65.06",
+      "memory_total_mb": 24564,
+      "memory_used_mb": 382,
+      "memory_free_mb": 23677,
+      "util_percent": 0,
+      "temperature_c": 49
+    },
+    "pytorch_cpu_runs": 500,
+    "pytorch_cuda_runs": 0,
+    "pytorch_cuda_error": "CUDA is not available to PyTorch",
+    "measurement_quality_errors": [
+      "4 estimated synthetic camera frame(s) were dropped (0.778%; tolerance 0.500%)",
+      "4 estimated synthetic camera frame(s) exceeded the 0.500% loss tolerance"
+    ],
+    "error_message": "CUDA is not available to PyTorch; 4 estimated synthetic camera frame(s) were dropped (0.778%; tolerance 0.500%); 4 estimated synthetic camera frame(s) exceeded the 0.500% loss tolerance"
+  },
+  "cuda_diagnostic": {
+    "record": "cuda-diagnostic/MobileNetV3/robot_cifar-10_guest-MS-7E27.json",
+    "trace": "cuda-diagnostic/MobileNetV3/onnxruntime_profile_20261122T150416_939043Z_2026-11-22_16-04-16.json",
+    "node_execution_event_counts": {
+      "CUDAExecutionProvider": 7755
+    },
+    "unique_node_counts_by_provider": {
+      "CUDAExecutionProvider": 141
+    },
+    "diagnostic_run_is_not_performance_valid": true,
+    "reason": "CUDA is not available to PyTorch; 1 estimated synthetic camera frame(s) were dropped (1.786%; tolerance 0.500%); 1 estimated synthetic camera frame(s) exceeded the 0.500% loss tolerance; ONNX Runtime profiling is enabled; latency samples are diagnostic only"
+  },
+  "comparison": {
+    "cpu_session_run_avg_ms": 12.511791318,
+    "cuda_session_run_avg_ms": 1.14800263,
+    "cpu_to_cuda_session_run_speedup": 10.898747956701111,
+    "cpu_full_callback_avg_ms": 16.743418446,
+    "cuda_full_callback_avg_ms": 3.876116682,
+    "interpretation": "Strict CUDA mode disables CPU execution-provider fallback; the separate diagnostic trace records all profiled ONNX node events on CUDA. PyTorch CUDA validation is unavailable here and its gpu_runs field is not the ONNX Runtime execution count."
+  }
+}
