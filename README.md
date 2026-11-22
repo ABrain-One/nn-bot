@@ -6,6 +6,35 @@ publishes model outputs, and writes a per-model latency/device record after the
 configured number of measured frames. It follows NN-VR's portable ONNX handoff
 and NN-Lite's measured-run statistics and device records.
 
+## Repository Layout
+
+```text
+nn-bot/
+├── ab/
+│   ├── bot/
+│   │   ├── dataset_pipeline.py  # Export, validate, and benchmark NN-Dataset models
+│   │   ├── port.py              # ROS 2 ONNX inference node
+│   │   ├── runtime.py           # Preprocessing, telemetry, and timing helpers
+│   │   └── synthetic_camera.py  # Synthetic image stream support
+│   └── nn/transform/            # Preprocessing transforms and manifests
+├── resource/                    # ROS package index marker
+├── scripts/                     # Helper scripts, including background runs
+├── stats/                       # Saved benchmark JSON and NN-Stat CSV records
+│   └── AirNet/provider-comparison/
+│       ├── cpu/                 # CPU-only ONNX Runtime benchmark
+│       ├── cuda/                # CUDA-only ONNX Runtime benchmark
+│       └── cuda-diagnostic/     # CUDA node-placement profile and summary
+├── tests/                       # Runtime and dataset-pipeline tests
+├── package.xml                  # ROS package dependencies and metadata
+├── requirements*.txt            # Python dependency sets
+├── setup.py / setup.cfg         # Python and ament package configuration
+└── README.md                    # Setup, usage, and benchmark guidance
+```
+
+Generated models, preprocessing manifests, and temporary benchmark outputs are
+kept under the ignored `_work/` directory unless selected results are copied
+into `stats/`.
+
 ## Requirements
 
 - Ubuntu 22.04 with ROS 2 Humble and `colcon`
