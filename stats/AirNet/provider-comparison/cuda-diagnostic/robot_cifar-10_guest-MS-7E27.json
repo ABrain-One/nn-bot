@@ -1,0 +1,1067 @@
+{
+  "model_name": "AirNet",
+  "dataset": "cifar-10",
+  "device_type": "Micro-Star International Co., Ltd. MS-7E27",
+  "board": "Micro-Star International Co., Ltd. MS-7E27",
+  "architecture": "x86_64",
+  "os_version": "Linux-6.8.0-138-generic-x86_64-with-glibc2.35",
+  "valid": false,
+  "profile_version": 7,
+  "run_complete": true,
+  "measurement_conditions_valid": true,
+  "preprocessing_provenance_valid": true,
+  "preprocessing_provenance_status": "model_manifest",
+  "inference_correctness_valid": true,
+  "inference_validation_status": "passed",
+  "performance_measurement_valid": false,
+  "measurement_quality_errors": [],
+  "performance_quality_errors": [
+    "ONNX Runtime profiling is enabled; latency samples are diagnostic only"
+  ],
+  "emulator": false,
+  "synthetic_input": true,
+  "input_source": "synthetic_camera",
+  "camera_rate_hz": 30.0,
+  "observed_input_rate_hz": 30.32954948950797,
+  "input_rate_target_met": true,
+  "input_rate_tolerance_fraction": 0.95,
+  "dropped_frame_fraction": 0.0,
+  "dropped_frame_tolerance_fraction": 0.005,
+  "dropped_frame_tolerance_met": true,
+  "iterations": 20,
+  "startup_drop_frames": 10,
+  "startup_frames_dropped": 10,
+  "readiness_handshake": true,
+  "image_subscription_queue_depth": 1,
+  "failed_frames": 0,
+  "clock_inconsistency_frames": 0,
+  "clock_error_message": null,
+  "dropped_frames": 0,
+  "arrival_frame_count": 22,
+  "last_frame_error": null,
+  "error_message": "CUDA is not available to PyTorch; ONNX Runtime profiling is enabled; latency samples are diagnostic only",
+  "duration": 2075118,
+  "deadline_ms": 33.0,
+  "deadline_missed_frames": 0,
+  "missed_deadlines": 0,
+  "cpu_runs": 20,
+  "gpu_runs": 0,
+  "npu_duration": null,
+  "npu_min_duration": null,
+  "npu_max_duration": null,
+  "npu_std_dev": null,
+  "npu_runs": 0,
+  "npu_error": null,
+  "unit": "Micro-Star International Co., Ltd. MS-7E27",
+  "runtime": "PyTorch and ONNX Runtime",
+  "onnxruntime_provider": "CUDAExecutionProvider",
+  "onnxruntime_execution_mode": "cuda",
+  "onnxruntime_requested_providers": [
+    "CUDAExecutionProvider"
+  ],
+  "onnxruntime_active_providers": [
+    "CUDAExecutionProvider",
+    "CPUExecutionProvider"
+  ],
+  "onnxruntime_provider_status": "strict CUDA execution; CPU EP fallback disabled",
+  "onnxruntime_profiling_enabled": true,
+  "onnxruntime_profile": {
+    "trace_path": "onnxruntime_profile_20261117T173133_142136Z_2026-11-17_18-31-33.json",
+    "node_execution_event_counts": {
+      "CUDAExecutionProvider": 616
+    },
+    "unique_node_counts_by_provider": {
+      "CUDAExecutionProvider": 28
+    },
+    "operator_event_counts_by_provider": {
+      "CUDAExecutionProvider": {
+        "Conv": 264,
+        "Relu": 198,
+        "Add": 88,
+        "GlobalAveragePool": 22,
+        "Flatten": 22,
+        "Gemm": 22
+      }
+    }
+  },
+  "model_format": "onnx",
+  "output_normalization": "none",
+  "preprocessing_manifest": "/home/pritamkadam/nn-bot/_work/onnx/cifar-10/AirNet.preprocess.json",
+  "preprocessing": {
+    "version": 1,
+    "model": "AirNet",
+    "dataset": "cifar-10",
+    "transform": "norm_128",
+    "color_mode": "RGB",
+    "omitted_training_augmentations": [],
+    "operations": [
+      {
+        "type": "resize",
+        "size": 128,
+        "mode": "shorter",
+        "interpolation": "bilinear"
+      },
+      {
+        "type": "center_crop",
+        "size": [
+          128,
+          128
+        ]
+      },
+      {
+        "type": "to_tensor",
+        "scale": 0.00392156862745098
+      },
+      {
+        "type": "normalize",
+        "mean": [
+          0.4914,
+          0.4822,
+          0.4465
+        ],
+        "std": [
+          0.247,
+          0.2435,
+          0.2616
+        ]
+      }
+    ]
+  },
+  "input_topic": "/camera/image_raw",
+  "inference_time_scope": "image_preprocessing_through_output_publish",
+  "onnxruntime_inference_time_scope": "session_run_only",
+  "model_size_bytes": 19608002,
+  "input_shape": [
+    1,
+    3,
+    128,
+    128
+  ],
+  "output_shape": [
+    1,
+    10
+  ],
+  "latency_ns": {
+    "avg": 2075117.6,
+    "median": 2171121.0,
+    "p95": 2324186.55,
+    "p99": 2336886.91,
+    "min": 1720671.0,
+    "max": 2340062.0,
+    "std": 223608.43386495957,
+    "samples": [
+      1740361.0,
+      1720671.0,
+      2030281.0,
+      1723811.0,
+      1861731.0,
+      1784791.0,
+      2163661.0,
+      2259811.0,
+      2233571.0,
+      2340062.0,
+      2323351.0,
+      2172771.0,
+      2237511.0,
+      2301502.0,
+      2239641.0,
+      2249341.0,
+      2272361.0,
+      2169471.0,
+      1793321.0,
+      1884331.0
+    ],
+    "deadline_misses": 0
+  },
+  "onnxruntime_latency_ns": {
+    "avg": 456271.2,
+    "median": 531666.0,
+    "p95": 547872.5,
+    "p99": 562502.5,
+    "min": 318900.0,
+    "max": 566160.0,
+    "std": 103770.00819485368,
+    "samples": [
+      325880.0,
+      323950.0,
+      318900.0,
+      323530.0,
+      368470.0,
+      325641.0,
+      546830.0,
+      539580.0,
+      539650.0,
+      530651.0,
+      532681.0,
+      538050.0,
+      546910.0,
+      540331.0,
+      536040.0,
+      566160.0,
+      528990.0,
+      539490.0,
+      327730.0,
+      325960.0
+    ]
+  },
+  "end_to_end_latency_ns": {
+    "avg": 17027035.9,
+    "median": 3066726.0,
+    "p95": 90591274.30000003,
+    "p99": 114195313.25999996,
+    "min": 2237871.0,
+    "max": 120096323.0,
+    "std": 32269298.725556567,
+    "samples": [
+      120096323.0,
+      89038377.0,
+      58296891.0,
+      27235574.0,
+      2328671.0,
+      2251381.0,
+      2876151.0,
+      3089381.0,
+      3044512.0,
+      3150712.0,
+      3140062.0,
+      3005652.0,
+      2984931.0,
+      3118692.0,
+      3056341.0,
+      3077111.0,
+      3114962.0,
+      2989372.0,
+      2237871.0,
+      2407751.0
+    ]
+  },
+  "end_to_end_latency_scope": "image_header_stamp_to_output_publish",
+  "end_to_end_header_timestamp_frames": 20,
+  "callback_latency_ns": {
+    "avg": 2098301.1,
+    "median": 2199596.0,
+    "p95": 2352850.05,
+    "p99": 2365755.61,
+    "min": 1734151.0,
+    "max": 2368982.0,
+    "std": 229674.448387473,
+    "samples": [
+      1757461.0,
+      1734151.0,
+      2043221.0,
+      1736601.0,
+      1879951.0,
+      1801501.0,
+      2190371.0,
+      2288061.0,
+      2262501.0,
+      2368982.0,
+      2352001.0,
+      2200811.0,
+      2265171.0,
+      2331642.0,
+      2267551.0,
+      2277101.0,
+      2301161.0,
+      2198381.0,
+      1808571.0,
+      1900831.0
+    ]
+  },
+  "callback_latency_scope": "callback_entry_to_output_publish",
+  "source_to_callback_latency_ns": {
+    "avg": 14937232.8,
+    "median": 798200.5,
+    "p95": 88862213.30000003,
+    "p99": 112449836.25999996,
+    "min": 435700.0,
+    "max": 118346742.0,
+    "std": 32396433.15308187,
+    "samples": [
+      118346742.0,
+      87310396.0,
+      56259300.0,
+      25504603.0,
+      456180.0,
+      456570.0,
+      695030.0,
+      810670.0,
+      792351.0,
+      791510.0,
+      797841.0,
+      814551.0,
+      729390.0,
+      797420.0,
+      798560.0,
+      810100.0,
+      823461.0,
+      800831.0,
+      435700.0,
+      513450.0
+    ]
+  },
+  "source_to_callback_latency_scope": "image_header_stamp_to_callback_entry",
+  "measurement_condition_warnings": [],
+  "gpu_preflight": {
+    "ros": {
+      "label": "ROS",
+      "snapshot": [
+        {
+          "index": 0,
+          "name": "NVIDIA GeForce RTX 4090",
+          "driver": "580.65.06",
+          "memory_total_mb": 24564,
+          "memory_used_mb": 380,
+          "memory_free_mb": 23680,
+          "util_percent": 0,
+          "temperature_c": 54
+        }
+      ],
+      "assessment": {
+        "available": true,
+        "busy": false,
+        "thresholds": {
+          "utilization_percent": 20.0,
+          "memory_used_percent": 20.0
+        },
+        "devices": [
+          {
+            "index": 0,
+            "name": "NVIDIA GeForce RTX 4090",
+            "driver": "580.65.06",
+            "memory_total_mb": 24564,
+            "memory_used_mb": 380,
+            "memory_free_mb": 23680,
+            "util_percent": 0,
+            "temperature_c": 54,
+            "memory_used_percent": 1.5469793193290995,
+            "busy": false
+          }
+        ],
+        "warnings": []
+      }
+    },
+    "pytorch": {
+      "label": "PyTorch",
+      "snapshot": [
+        {
+          "index": 0,
+          "name": "NVIDIA GeForce RTX 4090",
+          "driver": "580.65.06",
+          "memory_total_mb": 24564,
+          "memory_used_mb": 380,
+          "memory_free_mb": 23680,
+          "util_percent": 0,
+          "temperature_c": 54
+        }
+      ],
+      "assessment": {
+        "available": true,
+        "busy": false,
+        "thresholds": {
+          "utilization_percent": 20.0,
+          "memory_used_percent": 20.0
+        },
+        "devices": [
+          {
+            "index": 0,
+            "name": "NVIDIA GeForce RTX 4090",
+            "driver": "580.65.06",
+            "memory_total_mb": 24564,
+            "memory_used_mb": 380,
+            "memory_free_mb": 23680,
+            "util_percent": 0,
+            "temperature_c": 54,
+            "memory_used_percent": 1.5469793193290995,
+            "busy": false
+          }
+        ],
+        "warnings": []
+      }
+    }
+  },
+  "in_dim_0": 1,
+  "in_dim_1": 128,
+  "in_dim_2": 128,
+  "in_dim_3": 3,
+  "device_analytics": {
+    "timestamp": "2026-11-17T17:31:32.699725+00:00",
+    "python_version": "3.10.12",
+    "ros_distro": "humble",
+    "cpu_cores": 16,
+    "cpu_affinity": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15
+    ],
+    "cpu_frequencies": {
+      "cur_freq_mhz": 2969.4375000000005,
+      "min_freq_mhz": 545.0,
+      "max_freq_mhz": 5050.0,
+      "scaling_governor": "performance"
+    },
+    "cpu_frequencies_before": {
+      "cur_freq_mhz": 3420.8125000000005,
+      "min_freq_mhz": 545.0,
+      "max_freq_mhz": 5050.0,
+      "scaling_governor": "performance"
+    },
+    "temperatures": {
+      "nvme": [
+        {
+          "label": "Composite",
+          "current_c": 41.85,
+          "high_c": 81.85,
+          "critical_c": 84.85
+        },
+        {
+          "label": "Sensor 1",
+          "current_c": 41.85,
+          "high_c": 65261.85,
+          "critical_c": 65261.85
+        },
+        {
+          "label": "Sensor 2",
+          "current_c": 44.85,
+          "high_c": 65261.85,
+          "critical_c": 65261.85
+        }
+      ],
+      "k10temp": [
+        {
+          "label": "Tctl",
+          "current_c": 61.25,
+          "high_c": null,
+          "critical_c": null
+        },
+        {
+          "label": "Tccd1",
+          "current_c": 44.875,
+          "high_c": null,
+          "critical_c": null
+        }
+      ],
+      "amdgpu": [
+        {
+          "label": "edge",
+          "current_c": 43.0,
+          "high_c": null,
+          "critical_c": null
+        }
+      ]
+    },
+    "temperatures_before": {
+      "nvme": [
+        {
+          "label": "Composite",
+          "current_c": 41.85,
+          "high_c": 81.85,
+          "critical_c": 84.85
+        },
+        {
+          "label": "Sensor 1",
+          "current_c": 41.85,
+          "high_c": 65261.85,
+          "critical_c": 65261.85
+        },
+        {
+          "label": "Sensor 2",
+          "current_c": 45.85,
+          "high_c": 65261.85,
+          "critical_c": 65261.85
+        }
+      ],
+      "k10temp": [
+        {
+          "label": "Tctl",
+          "current_c": 64.5,
+          "high_c": null,
+          "critical_c": null
+        },
+        {
+          "label": "Tccd1",
+          "current_c": 47.625,
+          "high_c": null,
+          "critical_c": null
+        }
+      ],
+      "amdgpu": [
+        {
+          "label": "edge",
+          "current_c": 43.0,
+          "high_c": null,
+          "critical_c": null
+        }
+      ]
+    },
+    "cpu_telemetry": {
+      "sampling_interval_seconds": 1.0,
+      "sample_count": 1,
+      "measurement_window_seconds": 0.5120373889803886,
+      "frequency_samples_are_diagnostic_only": true,
+      "samples": [
+        {
+          "elapsed_seconds": 0.0007218010723590851,
+          "process_cpu_percent": null,
+          "per_core": [
+            {
+              "cpu": 0,
+              "utilization_percent": null,
+              "frequency_mhz": 3921.0,
+              "min_frequency_mhz": 545.0,
+              "max_frequency_mhz": 5050.0
+            },
+            {
+              "cpu": 1,
+              "utilization_percent": null,
+              "frequency_mhz": 3918.0,
+              "min_frequency_mhz": 545.0,
+              "max_frequency_mhz": 5050.0
+            },
+            {
+              "cpu": 2,
+              "utilization_percent": null,
+              "frequency_mhz": 3919.0,
+              "min_frequency_mhz": 545.0,
+              "max_frequency_mhz": 5050.0
+            },
+            {
+              "cpu": 3,
+              "utilization_percent": null,
+              "frequency_mhz": 545.0,
+              "min_frequency_mhz": 545.0,
+              "max_frequency_mhz": 5050.0
+            },
+            {
+              "cpu": 4,
+              "utilization_percent": null,
+              "frequency_mhz": 545.0,
+              "min_frequency_mhz": 545.0,
+              "max_frequency_mhz": 5050.0
+            },
+            {
+              "cpu": 5,
+              "utilization_percent": null,
+              "frequency_mhz": 3923.0,
+              "min_frequency_mhz": 545.0,
+              "max_frequency_mhz": 5050.0
+            },
+            {
+              "cpu": 6,
+              "utilization_percent": null,
+              "frequency_mhz": 3960.0,
+              "min_frequency_mhz": 545.0,
+              "max_frequency_mhz": 5050.0
+            },
+            {
+              "cpu": 7,
+              "utilization_percent": null,
+              "frequency_mhz": 4144.0,
+              "min_frequency_mhz": 545.0,
+              "max_frequency_mhz": 5050.0
+            },
+            {
+              "cpu": 8,
+              "utilization_percent": null,
+              "frequency_mhz": 545.0,
+              "min_frequency_mhz": 545.0,
+              "max_frequency_mhz": 5050.0
+            },
+            {
+              "cpu": 9,
+              "utilization_percent": null,
+              "frequency_mhz": 3918.0,
+              "min_frequency_mhz": 545.0,
+              "max_frequency_mhz": 5050.0
+            },
+            {
+              "cpu": 10,
+              "utilization_percent": null,
+              "frequency_mhz": 3955.0,
+              "min_frequency_mhz": 545.0,
+              "max_frequency_mhz": 5050.0
+            },
+            {
+              "cpu": 11,
+              "utilization_percent": null,
+              "frequency_mhz": 4857.0,
+              "min_frequency_mhz": 545.0,
+              "max_frequency_mhz": 5050.0
+            },
+            {
+              "cpu": 12,
+              "utilization_percent": null,
+              "frequency_mhz": 3903.0,
+              "min_frequency_mhz": 545.0,
+              "max_frequency_mhz": 5050.0
+            },
+            {
+              "cpu": 13,
+              "utilization_percent": null,
+              "frequency_mhz": 4895.0,
+              "min_frequency_mhz": 545.0,
+              "max_frequency_mhz": 5050.0
+            },
+            {
+              "cpu": 14,
+              "utilization_percent": null,
+              "frequency_mhz": 3886.0,
+              "min_frequency_mhz": 545.0,
+              "max_frequency_mhz": 5050.0
+            },
+            {
+              "cpu": 15,
+              "utilization_percent": null,
+              "frequency_mhz": 545.0,
+              "min_frequency_mhz": 545.0,
+              "max_frequency_mhz": 5050.0
+            }
+          ]
+        }
+      ],
+      "sampling_errors": []
+    },
+    "onnxruntime_version": "1.23.2",
+    "onnx_num_threads": 1,
+    "providers": [
+      "CUDAExecutionProvider",
+      "CPUExecutionProvider"
+    ],
+    "cpu_info": {
+      "cpu_cores": 16,
+      "cpu_affinity": [
+        0,
+        1,
+        2,
+        3,
+        4,
+        5,
+        6,
+        7,
+        8,
+        9,
+        10,
+        11,
+        12,
+        13,
+        14,
+        15
+      ],
+      "cpu_frequencies": {
+        "cur_freq_mhz": 2958.3125000000005,
+        "min_freq_mhz": 545.0,
+        "max_freq_mhz": 5050.0,
+        "scaling_governor": "performance"
+      },
+      "temperatures": {
+        "nvme": [
+          {
+            "label": "Composite",
+            "current_c": 41.85,
+            "high_c": 81.85,
+            "critical_c": 84.85
+          },
+          {
+            "label": "Sensor 1",
+            "current_c": 41.85,
+            "high_c": 65261.85,
+            "critical_c": 65261.85
+          },
+          {
+            "label": "Sensor 2",
+            "current_c": 45.85,
+            "high_c": 65261.85,
+            "critical_c": 65261.85
+          }
+        ],
+        "k10temp": [
+          {
+            "label": "Tctl",
+            "current_c": 61.375,
+            "high_c": null,
+            "critical_c": null
+          },
+          {
+            "label": "Tccd1",
+            "current_c": 51.0,
+            "high_c": null,
+            "critical_c": null
+          }
+        ],
+        "amdgpu": [
+          {
+            "label": "edge",
+            "current_c": 43.0,
+            "high_c": null,
+            "critical_c": null
+          }
+        ]
+      },
+      "processors": [
+        {
+          "vendor_id": "x86_64",
+          "model": "x86_64"
+        }
+      ],
+      "torch_threads": 8,
+      "onnx_num_threads": 1,
+      "util_percent_snapshot_mean": 1.0333333333333332
+    },
+    "gpu_info": {
+      "gpu_name": null,
+      "torch_cuda_available": false,
+      "torch_cuda_version": null,
+      "providers_available": [
+        "TensorrtExecutionProvider",
+        "CUDAExecutionProvider",
+        "CPUExecutionProvider"
+      ],
+      "util_percent_snapshot_mean": 0.0
+    },
+    "timeline": [
+      {
+        "phase": "before_eval",
+        "ts": "2026-11-17T17:31:32.176483Z",
+        "sys": {
+          "total_ram_bytes": 32702369792,
+          "free_ram_bytes": 2271985664,
+          "available_ram_bytes": 23386681344,
+          "used_ram_bytes": 8848629760,
+          "cached_ram_bytes": 19005571072,
+          "ram_percent": 28.5,
+          "cpu_percent": 1.2,
+          "process_cpu_percent": 0.0,
+          "process_rss_bytes": 507432960,
+          "cpu_frequencies": {
+            "cur_freq_mhz": 1451.1250000000007,
+            "min_freq_mhz": 545.0,
+            "max_freq_mhz": 5050.0,
+            "scaling_governor": "performance"
+          },
+          "temperatures": {
+            "nvme": [
+              {
+                "label": "Composite",
+                "current_c": 41.85,
+                "high_c": 81.85,
+                "critical_c": 84.85
+              },
+              {
+                "label": "Sensor 1",
+                "current_c": 41.85,
+                "high_c": 65261.85,
+                "critical_c": 65261.85
+              },
+              {
+                "label": "Sensor 2",
+                "current_c": 45.85,
+                "high_c": 65261.85,
+                "critical_c": 65261.85
+              }
+            ],
+            "k10temp": [
+              {
+                "label": "Tctl",
+                "current_c": 62.125,
+                "high_c": null,
+                "critical_c": null
+              },
+              {
+                "label": "Tccd1",
+                "current_c": 44.375,
+                "high_c": null,
+                "critical_c": null
+              }
+            ],
+            "amdgpu": [
+              {
+                "label": "edge",
+                "current_c": 43.0,
+                "high_c": null,
+                "critical_c": null
+              }
+            ]
+          }
+        },
+        "gpus": [
+          {
+            "index": 0,
+            "name": "NVIDIA GeForce RTX 4090",
+            "driver": "580.65.06",
+            "memory_total_mb": 24564,
+            "memory_used_mb": 380,
+            "memory_free_mb": 23680,
+            "util_percent": 0,
+            "temperature_c": 54
+          }
+        ]
+      },
+      {
+        "phase": "after_cpu",
+        "ts": "2026-11-17T17:31:32.387019Z",
+        "sys": {
+          "total_ram_bytes": 32702369792,
+          "free_ram_bytes": 2247802880,
+          "available_ram_bytes": 23362543616,
+          "used_ram_bytes": 8872947712,
+          "cached_ram_bytes": 19005435904,
+          "ram_percent": 28.6,
+          "cpu_percent": 1.9,
+          "process_cpu_percent": 0.0,
+          "process_rss_bytes": 533671936,
+          "cpu_frequencies": {
+            "cur_freq_mhz": 1491.9375000000005,
+            "min_freq_mhz": 545.0,
+            "max_freq_mhz": 5050.0,
+            "scaling_governor": "performance"
+          },
+          "temperatures": {
+            "nvme": [
+              {
+                "label": "Composite",
+                "current_c": 41.85,
+                "high_c": 81.85,
+                "critical_c": 84.85
+              },
+              {
+                "label": "Sensor 1",
+                "current_c": 41.85,
+                "high_c": 65261.85,
+                "critical_c": 65261.85
+              },
+              {
+                "label": "Sensor 2",
+                "current_c": 45.85,
+                "high_c": 65261.85,
+                "critical_c": 65261.85
+              }
+            ],
+            "k10temp": [
+              {
+                "label": "Tctl",
+                "current_c": 61.75,
+                "high_c": null,
+                "critical_c": null
+              },
+              {
+                "label": "Tccd1",
+                "current_c": 45.25,
+                "high_c": null,
+                "critical_c": null
+              }
+            ],
+            "amdgpu": [
+              {
+                "label": "edge",
+                "current_c": 43.0,
+                "high_c": null,
+                "critical_c": null
+              }
+            ]
+          }
+        },
+        "gpus": [
+          {
+            "index": 0,
+            "name": "NVIDIA GeForce RTX 4090",
+            "driver": "580.65.06",
+            "memory_total_mb": 24564,
+            "memory_used_mb": 380,
+            "memory_free_mb": 23680,
+            "util_percent": 0,
+            "temperature_c": 54
+          }
+        ]
+      },
+      {
+        "phase": "after_gpu",
+        "ts": "2026-11-17T17:31:32.509358Z",
+        "sys": {
+          "total_ram_bytes": 32702369792,
+          "free_ram_bytes": 2229739520,
+          "available_ram_bytes": 23344533504,
+          "used_ram_bytes": 8890957824,
+          "cached_ram_bytes": 19005489152,
+          "ram_percent": 28.6,
+          "cpu_percent": 0.0,
+          "process_cpu_percent": 0.0,
+          "process_rss_bytes": 533671936,
+          "cpu_frequencies": {
+            "cur_freq_mhz": 802.2499999999999,
+            "min_freq_mhz": 545.0,
+            "max_freq_mhz": 5050.0,
+            "scaling_governor": "performance"
+          },
+          "temperatures": {
+            "nvme": [
+              {
+                "label": "Composite",
+                "current_c": 41.85,
+                "high_c": 81.85,
+                "critical_c": 84.85
+              },
+              {
+                "label": "Sensor 1",
+                "current_c": 41.85,
+                "high_c": 65261.85,
+                "critical_c": 65261.85
+              },
+              {
+                "label": "Sensor 2",
+                "current_c": 45.85,
+                "high_c": 65261.85,
+                "critical_c": 65261.85
+              }
+            ],
+            "k10temp": [
+              {
+                "label": "Tctl",
+                "current_c": 61.5,
+                "high_c": null,
+                "critical_c": null
+              },
+              {
+                "label": "Tccd1",
+                "current_c": 44.375,
+                "high_c": null,
+                "critical_c": null
+              }
+            ],
+            "amdgpu": [
+              {
+                "label": "edge",
+                "current_c": 43.0,
+                "high_c": null,
+                "critical_c": null
+              }
+            ]
+          }
+        },
+        "gpus": [
+          {
+            "index": 0,
+            "name": "NVIDIA GeForce RTX 4090",
+            "driver": "580.65.06",
+            "memory_total_mb": 24564,
+            "memory_used_mb": 380,
+            "memory_free_mb": 23680,
+            "util_percent": 0,
+            "temperature_c": 54
+          }
+        ]
+      }
+    ],
+    "profile": {
+      "peak_cpu_rss_bytes": 533671936,
+      "peak_gpu_mb": 380,
+      "torch_peak_gpu_allocated_mb": null,
+      "cpu_util_percent_samples": [
+        1.2,
+        1.9,
+        0.0
+      ],
+      "gpu_util_percent_samples": [
+        0,
+        0,
+        0
+      ],
+      "utilization_sampling": "before_eval, after_cpu, after_gpu snapshots",
+      "input_source": "first transformed NN-Dataset training sample"
+    },
+    "onnxruntime_providers": [
+      "CUDAExecutionProvider",
+      "CPUExecutionProvider"
+    ],
+    "onnxruntime_timestamp": "2026-11-17T17:31:34.826705+00:00",
+    "torch_version": "2.14.1+cpu"
+  },
+  "warmup_runs": 2,
+  "completed_warmups": 2,
+  "cpu_duration": 3466219,
+  "cpu_min_duration": 3044811,
+  "cpu_max_duration": 5214703,
+  "cpu_median_duration": 3116202,
+  "cpu_p95_duration": 5176702,
+  "cpu_p99_duration": 5207103,
+  "cpu_std_dev": 731886.0971233348,
+  "cpu_error": null,
+  "gpu_duration": null,
+  "gpu_min_duration": null,
+  "gpu_max_duration": null,
+  "gpu_median_duration": null,
+  "gpu_p95_duration": null,
+  "gpu_p99_duration": null,
+  "gpu_std_dev": null,
+  "gpu_error": "CUDA is not available to PyTorch",
+  "torch_cpu_threads": 8,
+  "torch_gpu_name": null,
+  "cpu_finite": true,
+  "gpu_finite": null,
+  "cpu_gpu_match": null,
+  "cpu_gpu_max_abs_error": null,
+  "cpu_gpu_top1_match": null,
+  "cpu_gpu_rtol": 0.01,
+  "cpu_gpu_atol": 0.002,
+  "pytorch_onnx_match": true,
+  "pytorch_onnx_max_abs_error": 5.9604644775390625e-06,
+  "gpu_onnx_match": null,
+  "gpu_onnx_max_abs_error": null,
+  "total_ram_kb": 31935908,
+  "free_ram_kb": 2177480,
+  "available_ram_kb": 22797396,
+  "cached_kb": 18560048,
+  "task": "img-classification",
+  "metric": "accuracy",
+  "training_accuracy": 0.8657,
+  "checkpoint_repository": "NN-Dataset/checkpoints-epoch-50",
+  "checkpoint_epoch": 50,
+  "gpu_backend": null,
+  "cpu_backend": "PyTorch CPU",
+  "pytorch_cpu_runs": 20,
+  "pytorch_cuda_runs": 0,
+  "pytorch_cpu_backend": "PyTorch CPU",
+  "pytorch_cuda_backend": null,
+  "cpu_runs_ns": [
+    5130913,
+    5214703,
+    5174702,
+    3669972,
+    3094882,
+    3491832,
+    3146371,
+    3155662,
+    3105802,
+    3089941,
+    3102022,
+    3107472,
+    3102811,
+    3151482,
+    3148402,
+    3111421,
+    3055342,
+    3044811,
+    3104852,
+    3120982
+  ],
+  "gpu_runs_ns": [],
+  "onnxruntime_consistency_providers": [
+    "CPUExecutionProvider"
+  ],
+  "pytorch_duration": 3466219,
+  "pytorch_unit": "CPU",
+  "pytorch_inference_time_scope": "pytorch_cpu_forward_only",
+  "inference_validation_errors": []
+}

@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "model": "AirNet",
+  "dataset": "cifar-10",
+  "transform": "norm_128",
+  "color_mode": "RGB",
+  "omitted_training_augmentations": [],
+  "operations": [
+    {
+      "type": "resize",
+      "size": 128,
+      "mode": "shorter",
+      "interpolation": "bilinear"
+    },
+    {
+      "type": "center_crop",
+      "size": [
+        128,
+        128
+      ]
+    },
+    {
+      "type": "to_tensor",
+      "scale": 0.00392156862745098
+    },
+    {
+      "type": "normalize",
+      "mean": [
+        0.4914,
+        0.4822,
+        0.4465
+      ],
+      "std": [
+        0.247,
+        0.2435,
+        0.2616
+      ]
+    }
+  ]
+}
