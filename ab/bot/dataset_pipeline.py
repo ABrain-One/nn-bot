@@ -692,7 +692,7 @@ def _has_complete_record(model_name, args):
     return (
         record.get("valid") is True
         and record.get("dataset") == args.dataset
-        and record.get("profile_version") == 7
+        and record.get("profile_version") == 8
         and record.get("onnxruntime_execution_mode", "auto")
         == getattr(args, "onnx_provider", "auto")
         and record.get("run_complete") is True
@@ -765,7 +765,7 @@ def _merge_profile(model_name, args, profile):
     record["pytorch_cuda_backend"] = (
         "PyTorch CUDA" if profile["gpu_runs"] else None
     )
-    record["profile_version"] = 7
+    record["profile_version"] = 8
     analytics.update(profile["device_analytics"])
     analytics["onnxruntime_version"] = ort_version
     analytics["onnxruntime_providers"] = ort_providers
@@ -1020,6 +1020,15 @@ def _run_model(model_path, model_name, args):
         "results_dir": args.results_dir.resolve(),
         "dataset": args.dataset,
         "synthetic_input": args.emulate_camera,
+        "emulator": args.emulate_camera,
+        "use_sim_time": args.use_sim_time,
+        "real_time_factor": args.real_time_factor,
+        "measurement_mode": args.measurement_mode,
+        "allow_spinning": args.allow_spinning,
+        "warmup_convergence_window": args.warmup_convergence_window,
+        "warmup_convergence_tolerance_percent": args.warmup_convergence_tolerance_percent,
+        "realtime_priority": args.realtime_priority,
+        "lock_memory": args.lock_memory,
         "camera_rate_hz": args.camera_rate_hz if args.emulate_camera else 0.0,
         "camera_data_timeout": args.camera_data_timeout,
         "warmup_runs": args.warmup_runs,
@@ -1028,6 +1037,9 @@ def _run_model(model_path, model_name, args):
         "ready_topic": args.ready_topic,
         "deadline_ms": args.deadline_ms,
         "cpu_affinity": args.cpu_affinity if args.cpu_affinity is not None else -1,
+        "cpu_affinity_cpus": ",".join(
+            str(cpu) for cpu in args.cpu_affinity_cpus
+        ),
         "onnx_num_threads": args.onnx_num_threads,
         "onnx_execution_mode": args.onnx_provider,
         "gpu_utilization_limit": args.gpu_utilization_limit,
@@ -1037,6 +1049,8 @@ def _run_model(model_path, model_name, args):
     }
     command = _inference_command()
     for key, value in params.items():
+        if value == "":
+            continue
         if isinstance(value, Path):
             value = str(value)
         if isinstance(value, list):
@@ -1187,11 +1201,53 @@ def parser():
         help="Pin benchmark processes to a specific CPU core",
     )
     ap.add_argument(
+        "--cpu-affinity-cpus",
+        type=int,
+        nargs="+",
+        default=[],
+        help="Pin benchmark processes to a set of CPU cores",
+    )
+    ap.add_argument(
         "--onnx-num-threads",
         type=int,
         default=1,
         help="Number of intra-op threads for ONNX Runtime sessions (default: 1)",
     )
+    ap.add_argument(
+        "--measurement-mode",
+        choices=("frame", "saturated"),
+        default="frame",
+        help="Frame arrivals or back-to-back saturated session.run() calls",
+    )
+    ap.add_argument(
+        "--allow-spinning",
+        action="store_true",
+        help="Allow ONNX Runtime worker-thread spin waiting",
+    )
+    ap.add_argument(
+        "--warmup-convergence-window",
+        type=int,
+        default=0,
+        help="Check convergence across this many tail warm-ups (0 disables)",
+    )
+    ap.add_argument(
+        "--warmup-convergence-tolerance-percent",
+        type=float,
+        default=2.0,
+    )
+    ap.add_argument(
+        "--use-sim-time",
+        action="store_true",
+        help="Record that ROS uses /clock simulation time",
+    )
+    ap.add_argument(
+        "--real-time-factor",
+        type=float,
+        default=1.0,
+        help="Gazebo/ROS real-time factor used for frame-drop interpretation",
+    )
+    ap.add_argument("--realtime-priority", type=int, default=0)
+    ap.add_argument("--lock-memory", action="store_true")
     ap.add_argument(
         "--startup-drop-frames",
         type=int,

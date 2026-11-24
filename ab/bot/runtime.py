@@ -498,6 +498,14 @@ class CpuTelemetryMonitor:
             if include_utilization
             else None
         )
+        try:
+            context_switches = self._process.num_ctx_switches()
+            process_context_switches = {
+                "voluntary": context_switches.voluntary,
+                "involuntary": context_switches.involuntary,
+            }
+        except (self._psutil.Error, OSError, AttributeError):
+            process_context_switches = None
         per_core = []
         for index, frequency in enumerate(frequencies):
             current = frequency.current
@@ -525,6 +533,7 @@ class CpuTelemetryMonitor:
         sample = {
             "elapsed_seconds": time.monotonic() - self._started_at,
             "process_cpu_percent": process_utilization,
+            "process_context_switches": process_context_switches,
             "per_core": per_core,
         }
         with self._samples_lock:

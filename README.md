@@ -126,6 +126,16 @@ Without a manifest, the legacy preprocessing resizes with nearest-neighbor
 sampling, converts RGB pixels to float32 in `[0, 1]`, and supports NCHW or NHWC
 input layouts.
 
+Additional benchmark controls make duty-cycle and environment differences
+explicit. `--measurement-mode saturated` runs back-to-back `session.run()` calls;
+`--allow-spinning` permits ONNX Runtime thread spin waiting (it is disabled by
+default). `--warmup-convergence-window` enables a median convergence check.
+`--use-sim-time` and `--real-time-factor` record Gazebo/ROS clock information;
+`--emulator` is set by `--emulate-camera`. `--realtime-priority` requests
+`SCHED_FIFO` and `--lock-memory` requests memory locking, but the record reports
+whether those privileged OS operations succeeded. `--cpu-affinity-cpus` pins the
+process to a set of cores; it does not separate camera and inference processes.
+
 The published output is the raw first model output by default. Set
 `-p output_normalization:=l2` only when downstream consumers require L2-normalized
 values. Benchmark records identify the selected output normalization and the
@@ -347,8 +357,10 @@ are omitted from `end_to_end_latency_ns`. If a header timestamp is later than
 the ROS callback-entry or publish time, the frame is counted in
 `clock_inconsistency_frames`, excluded from the header-based metric, and makes
 the run invalid rather than substituting callback timing. The `emulator` field
-means Android emulator and is `false` for this ROS-hosted node. Synthetic runs
-separately record `synthetic_input: true` and the requested camera rate;
+is true when `--emulate-camera` requested a synthetic camera stream; it does not
+indicate that Gazebo is running. `use_sim_time` separately records whether ROS
+simulation time is enabled. Synthetic runs also record `synthetic_input: true`
+and the requested camera rate;
 physical camera runs record `synthetic_input: false`. These figures measure
 the host and ROS path under the configured synthetic stream, not camera optics,
 sensor acquisition, or the physical robot's environment.

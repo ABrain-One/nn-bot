@@ -63,7 +63,16 @@ class InferenceNode(Node):
         self.declare_parameter("iterations", 500)
         self.declare_parameter("deadline_ms", 33.0)
         self.declare_parameter("cpu_affinity", -1)
+        self.declare_parameter("cpu_affinity_cpus", "")
         self.declare_parameter("onnx_num_threads", 0)
+        self.declare_parameter("allow_spinning", False)
+        self.declare_parameter("measurement_mode", "frame")
+        self.declare_parameter("warmup_convergence_window", 0)
+        self.declare_parameter("warmup_convergence_tolerance_percent", 2.0)
+        self.declare_parameter("realtime_priority", 0)
+        self.declare_parameter("lock_memory", False)
+        self.declare_parameter("real_time_factor", 1.0)
+        self.declare_parameter("emulator", False)
         self.declare_parameter("gpu_utilization_limit", 20.0)
         self.declare_parameter("gpu_memory_limit_percent", 20.0)
         self.declare_parameter("enable_onnx_profiling", False)
@@ -86,6 +95,65 @@ class InferenceNode(Node):
                 self.get_logger().warning(
                     f"Could not pin process to CPU core {cpu_affinity}"
                 )
+        else:
+            affinity_cpus = [
+                int(cpu.strip())
+                for cpu in str(
+                    self.get_parameter("cpu_affinity_cpus").value
+                ).split(",")
+                if cpu.strip()
+            ]
+            if affinity_cpus:
+                if set_cpu_affinity(affinity_cpus):
+                    self.get_logger().info(
+                        f"Pinned process to CPU cores {affinity_cpus}"
+                    )
+                else:
+                    self.get_logger().warning(
+                        f"Could not pin process to CPU cores {affinity_cpus}"
+                    )
+
+        realtime_priority = int(self.get_parameter("realtime_priority").value)
+        scheduling_status = "not_requested"
+        scheduling_error = None
+        if realtime_priority > 0:
+            try:
+                os.sched_setscheduler(
+                    0,
+                    os.SCHED_FIFO,
+                    os.sched_param(realtime_priority),
+                )
+                scheduling_status = "SCHED_FIFO"
+            except (AttributeError, OSError, ValueError) as error:
+                scheduling_status = "requested_but_unavailable"
+                scheduling_error = f"{type(error).__name__}: {error}"
+        if bool(self.get_parameter("lock_memory").value):
+            try:
+                import resource
+                _, hard_memlock_limit = resource.getrlimit(resource.RLIMIT_MEMLOCK)
+                resource.setrlimit(
+                    resource.RLIMIT_MEMLOCK,
+                    (hard_memlock_limit, hard_memlock_limit),
+                )
+            except (AttributeError, OSError, ValueError) as error:
+                scheduling_status = "partial"
+                scheduling_error = (
+                    f"{scheduling_error}; " if scheduling_error else ""
+                ) + f"mlockall unavailable: {type(error).__name__}: {error}"
+            else:
+                try:
+                    import ctypes
+                    libc = ctypes.CDLL(None, use_errno=True)
+                    if libc.mlockall(1 | 2) != 0:
+                        error_number = ctypes.get_errno()
+                        raise OSError(
+                            error_number,
+                            os.strerror(error_number),
+                        )
+                except (AttributeError, OSError) as error:
+                    scheduling_error = (
+                        f"{scheduling_error}; " if scheduling_error else ""
+                    ) + f"mlockall unavailable: {type(error).__name__}: {error}"
 
         model_path = Path(self.get_parameter("model_path").value).expanduser()
         if not model_path.is_file():
@@ -136,6 +204,32 @@ class InferenceNode(Node):
             raise ValueError("output_normalization must be 'none' or 'l2'")
         self.synthetic_input = bool(self.get_parameter("synthetic_input").value)
         self.camera_rate_hz = float(self.get_parameter("camera_rate_hz").value)
+        self.measurement_mode = str(
+            self.get_parameter("measurement_mode").value
+        ).lower()
+        if self.measurement_mode not in {"frame", "saturated"}:
+            raise ValueError("measurement_mode must be 'frame' or 'saturated'")
+        self.real_time_factor = float(
+            self.get_parameter("real_time_factor").value
+        )
+        self.emulator = bool(self.get_parameter("emulator").value)
+        self.scheduling_status = scheduling_status
+        self.scheduling_error = scheduling_error
+        if not math.isfinite(self.real_time_factor) or self.real_time_factor <= 0:
+            raise ValueError("real_time_factor must be finite and positive")
+        try:
+            self.use_sim_time = bool(
+                self.get_parameter("use_sim_time").value
+            )
+        except Exception:
+            self.use_sim_time = False
+        self.allow_spinning = bool(
+            self.get_parameter("allow_spinning").value
+        )
+        self.realtime_priority = int(
+            self.get_parameter("realtime_priority").value
+        )
+        self.lock_memory = bool(self.get_parameter("lock_memory").value)
         gpu_utilization_limit = float(
             self.get_parameter("gpu_utilization_limit").value
         )
@@ -202,6 +296,11 @@ class InferenceNode(Node):
         if onnx_num_threads > 0:
             session_options.intra_op_num_threads = onnx_num_threads
             session_options.inter_op_num_threads = 1
+        allow_spinning = bool(self.get_parameter("allow_spinning").value)
+        session_options.add_session_config_entry(
+            "session.disable_spinning",
+            "1" if not allow_spinning else "0",
+        )
         self.session = ort.InferenceSession(
             str(model_path), sess_options=session_options, providers=providers
         )
@@ -226,6 +325,23 @@ class InferenceNode(Node):
                 f"active providers: {', '.join(active_providers)}"
             )
         self.model_input = self.session.get_inputs()[0]
+        input_type = str(self.model_input.type)
+        numpy_dtype = {
+            "tensor(float)": np.float32,
+            "tensor(float16)": np.float16,
+            "tensor(double)": np.float64,
+            "tensor(int32)": np.int32,
+            "tensor(int64)": np.int64,
+            "tensor(uint8)": np.uint8,
+            "tensor(int8)": np.int8,
+        }.get(input_type, np.float32)
+        self.saturated_model_tensor = np.zeros(
+            tuple(
+                dimension if isinstance(dimension, int) and dimension > 0 else 1
+                for dimension in self.model_input.shape
+            ),
+            dtype=numpy_dtype,
+        )
         self.model_path = model_path
         self.input_scale = float(self.get_parameter("input_scale").value)
         self.input_mean = list(
@@ -247,12 +363,25 @@ class InferenceNode(Node):
                 operations=self.preprocessing_manifest["operations"],
             )
         self.warmup_runs = max(0, int(self.get_parameter("warmup_runs").value))
+        self.warmup_convergence_window = max(
+            0,
+            int(self.get_parameter("warmup_convergence_window").value),
+        )
+        self.warmup_convergence_tolerance_percent = float(
+            self.get_parameter("warmup_convergence_tolerance_percent").value
+        )
+        if (
+            not math.isfinite(self.warmup_convergence_tolerance_percent)
+            or self.warmup_convergence_tolerance_percent < 0
+        ):
+            raise ValueError("warmup_convergence_tolerance_percent must be non-negative")
         self.iterations = int(self.get_parameter("iterations").value)
         if self.iterations < 1:
             raise ValueError("iterations must be at least 1")
 
         self.bridge = CvBridge()
         self.completed_warmups = 0
+        self.warmup_latencies_ns = []
         self.startup_drop_frames = max(
             0, int(self.get_parameter("startup_drop_frames").value)
         )
@@ -317,6 +446,11 @@ class InferenceNode(Node):
         self.ready_publisher.publish(ready_message)
         self.ready = True
         self.ready_timer = self.create_timer(0.1, self.publish_readiness)
+        self.saturated_timer = None
+        if self.measurement_mode == "saturated":
+            self.saturated_timer = self.create_timer(
+                0.001, self.run_saturated_benchmark
+            )
         self.get_logger().info(
             f"Loaded {model_path.name}; providers: {', '.join(active_providers)}"
         )
@@ -335,6 +469,44 @@ class InferenceNode(Node):
             if self.ready_timer is not None:
                 self.ready_timer.cancel()
                 self.ready_timer = None
+
+    def run_saturated_benchmark(self):
+        if self.record_saved:
+            return
+        warmup_target = self.warmup_runs
+        measured_target = self.iterations
+        total_target = warmup_target + measured_target
+        if not hasattr(self, "saturated_completed"):
+            self.saturated_completed = 0
+
+        while self.saturated_completed < total_target:
+            started = time.perf_counter_ns()
+            outputs = self.session.run(
+                None,
+                {self.model_input.name: self.saturated_model_tensor},
+            )
+            elapsed_ns = time.perf_counter_ns() - started
+            self.saturated_completed += 1
+
+            if self.saturated_completed <= warmup_target:
+                self.warmup_latencies_ns.append(elapsed_ns)
+                continue
+
+            self.latencies_ns.append(elapsed_ns)
+            self.onnxruntime_latencies_ns.append(elapsed_ns)
+            process_model_output(outputs[0], self.output_normalization)
+            if len(self.latencies_ns) == measured_target:
+                if self.saturated_timer is not None:
+                    self.saturated_timer.cancel()
+                    self.saturated_timer = None
+                self.completed_warmups = warmup_target
+                self.save_record(list(self.saturated_model_tensor.shape), list(outputs[0].shape))
+                self.record_saved = True
+                if self.get_parameter("exit_after_benchmark").value:
+                    self.shutdown_timer = self.create_timer(
+                        0.1, self.stop_after_benchmark
+                    )
+                return
 
     def on_image(self, message):
         # Discard initial frames after model readiness, before any timing or
@@ -399,7 +571,7 @@ class InferenceNode(Node):
                         self.dropped_frames += dropped_frames_between(
                             self.previous_synthetic_stamp_ns,
                             source_stamp_ns,
-                            self.camera_rate_hz,
+                            self.camera_rate_hz * self.real_time_factor,
                         )
                     self.previous_synthetic_stamp_ns = source_stamp_ns
             except ValueError as error:
@@ -410,6 +582,7 @@ class InferenceNode(Node):
 
             if self.completed_warmups < self.warmup_runs:
                 self.completed_warmups += 1
+                self.warmup_latencies_ns.append(inference_elapsed_ns)
                 return
 
             if len(self.latencies_ns) < self.iterations:
@@ -460,6 +633,10 @@ class InferenceNode(Node):
             measurement_condition_warnings(cpu_frequencies_before, temperatures_before)
             + measurement_condition_warnings(cpu_frequencies, temperatures)
         ))
+        if self.scheduling_status in {"requested_but_unavailable", "partial"}:
+            condition_warnings.append(
+                f"Realtime scheduling/locking not fully available: {self.scheduling_error}"
+            )
         observed_input_rate_hz = (
             1_000_000_000 / float(np.mean(np.diff(self.arrival_timestamps_ns)))
             if len(self.arrival_timestamps_ns) > 1
@@ -510,6 +687,21 @@ class InferenceNode(Node):
                 f"observed input rate {observed_input_rate_hz:.2f} Hz was below "
                 f"95% of the requested {self.camera_rate_hz:g} Hz"
             )
+        if self.synthetic_input and self.real_time_factor != 1.0:
+            measurement_quality_errors.append(
+                f"ROS/Gazebo real-time factor is {self.real_time_factor:g}; "
+                "camera drop estimates and frame timing require independent wall-clock validation"
+            )
+        onnxruntime_timing = timing_stats(self.onnxruntime_latencies_ns)
+        onnxruntime_deadline_misses = int(
+            sum(1 for lat in self.onnxruntime_latencies_ns if lat > deadline_ns)
+        )
+        if onnxruntime_timing["p99"] is not None and onnxruntime_timing["p99"] > deadline_ns:
+            measurement_quality_errors.append(
+                f"ONNX Runtime p99 {onnxruntime_timing['p99'] / 1_000_000:.3f} ms "
+                f"exceeds deadline {deadline_ms:.3f} ms "
+                f"({onnxruntime_deadline_misses} samples exceeded)"
+            )
         if self.gpu_preflight["busy"]:
             measurement_quality_errors.append("GPU preflight detected a busy GPU")
         measurement_quality_errors.extend(condition_warnings)
@@ -531,6 +723,25 @@ class InferenceNode(Node):
         if self.enable_onnx_profiling:
             profile_path = self.session.end_profiling()
             onnxruntime_profile = summarize_onnxruntime_profile(profile_path)
+        warmup_median_ns = None
+        warmup_convergence_met = None
+        if self.warmup_latencies_ns:
+            warmup_stats = timing_stats(self.warmup_latencies_ns)
+            warmup_median_ns = warmup_stats["median"]
+        if self.warmup_convergence_window > 1 and len(self.warmup_latencies_ns) >= self.warmup_convergence_window:
+            tail = self.warmup_latencies_ns[-self.warmup_convergence_window:]
+            prefix = self.warmup_latencies_ns[:self.warmup_convergence_window]
+            tail_median = float(np.median(tail))
+            prefix_median = float(np.median(prefix))
+            warmup_convergence_met = (
+                abs(tail_median - prefix_median)
+                <= prefix_median * self.warmup_convergence_tolerance_percent / 100.0
+            )
+            if warmup_convergence_met is False:
+                measurement_quality_errors.append(
+                    "Warm-up convergence check did not converge within "
+                    f"{self.warmup_convergence_tolerance_percent:g}%"
+                )
         record = {
             "model_name": self.model_path.stem,
             "dataset": str(self.get_parameter("dataset").value),
@@ -539,7 +750,7 @@ class InferenceNode(Node):
             "architecture": platform.machine(),
             "os_version": platform.platform(),
             "valid": False,
-            "profile_version": 7,
+            "profile_version": 8,
             "run_complete": (
                 len(self.latencies_ns) == self.iterations and self.failed_frames == 0
             ),
@@ -554,7 +765,26 @@ class InferenceNode(Node):
             "performance_measurement_valid": performance_measurement_valid,
             "measurement_quality_errors": measurement_quality_errors,
             "performance_quality_errors": performance_quality_errors,
-            "emulator": False,
+            "emulator": self.emulator,
+            "emulator_requested": bool(
+                self.get_parameter("emulator").value
+            ),
+            "use_sim_time": self.use_sim_time,
+            "real_time_factor": self.real_time_factor,
+            "measurement_mode": self.measurement_mode,
+            "allow_spinning": self.allow_spinning,
+            "scheduling": {
+                "status": self.scheduling_status,
+                "realtime_priority": self.realtime_priority,
+                "lock_memory": self.lock_memory,
+                "error": self.scheduling_error,
+            },
+            "warmup_convergence": {
+                "window": self.warmup_convergence_window,
+                "tolerance_percent": self.warmup_convergence_tolerance_percent,
+                "median_ns": warmup_median_ns,
+                "converged": warmup_convergence_met,
+            },
             "synthetic_input": self.synthetic_input,
             "input_source": "synthetic_camera" if self.synthetic_input else "sensor_topic",
             "camera_rate_hz": self.camera_rate_hz if self.synthetic_input else None,

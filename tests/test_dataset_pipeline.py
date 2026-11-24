@@ -116,7 +116,7 @@ class DatasetPipelineTests(unittest.TestCase):
 			report_path.write_text(json.dumps({
 				"valid": True,
 				"dataset": args.dataset,
-				"profile_version": 7,
+				"profile_version": 8,
 				"onnxruntime_execution_mode": "auto",
 				"run_complete": True,
 				"onnxruntime_latency_ns": {"avg": 123.0},
@@ -356,6 +356,7 @@ class DatasetPipelineTests(unittest.TestCase):
 				record["pytorch_inference_time_scope"], "pytorch_cuda_forward_only"
 			)
 			self.assertEqual(record["onnxruntime_provider"], "CPUExecutionProvider")
+			self.assertEqual(record["profile_version"], 8)
 			self.assertEqual(
 				record["onnxruntime_active_providers"], ["CPUExecutionProvider"]
 			)
