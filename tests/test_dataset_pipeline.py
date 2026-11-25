@@ -410,6 +410,43 @@ class DatasetPipelineTests(unittest.TestCase):
 				record["nn_stat"]["duration"], 123 / 1_000_000_000
 			)
 
+			record["warmup_convergence"] = {"converged": False}
+			record["measurement_conditions_valid"] = True
+			record["measurement_quality_errors"] = []
+			path.write_text(json.dumps(record))
+			self.assertFalse(_merge_profile("AirNet", args, profile))
+			record = json.loads(path.read_text())
+			self.assertIn(
+				"Warm-up convergence check did not converge",
+				record["measurement_quality_errors"],
+			)
+
+			record["warmup_convergence"] = {"converged": True}
+			record["measurement_conditions_valid"] = True
+			record["measurement_quality_errors"] = []
+			path.write_text(json.dumps(record))
+			self.assertTrue(_merge_profile("AirNet", args, profile))
+			record = json.loads(path.read_text())
+
+			record["deadline_ms"] = 33.0
+			record["end_to_end_latency_ns"] = {"p99": 59_000_000.0}
+			record["measurement_conditions_valid"] = True
+			record["measurement_quality_errors"] = []
+			path.write_text(json.dumps(record))
+			self.assertFalse(_merge_profile("AirNet", args, profile))
+			record = json.loads(path.read_text())
+			self.assertIn(
+				"end-to-end p99 59.000 ms exceeds deadline 33.000 ms",
+				record["measurement_quality_errors"],
+			)
+
+			record["end_to_end_latency_ns"] = {"p99": 30_000_000.0}
+			record["measurement_conditions_valid"] = True
+			record["measurement_quality_errors"] = []
+			path.write_text(json.dumps(record))
+			self.assertTrue(_merge_profile("AirNet", args, profile))
+			record = json.loads(path.read_text())
+
 			record["device_analytics"]["providers"] = [
 				"CUDAExecutionProvider",
 				"CPUExecutionProvider",

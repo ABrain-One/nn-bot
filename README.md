@@ -190,8 +190,8 @@ configured deadline (default: 33 ms at 30 Hz).
 Records keep measurement and inference validation separate:
 `run_complete` means the requested number of frames was collected;
 `measurement_conditions_valid` reports clock, camera-rate, dropped-frame, CPU,
-and GPU-preflight checks; `preprocessing_provenance_valid` requires a model
-preprocessing manifest; and `inference_correctness_valid` is set by the
+GPU-preflight, and end-to-end deadline checks; `preprocessing_provenance_valid`
+requires a model preprocessing manifest; and `inference_correctness_valid` is set by the
 PyTorch/ONNX comparison. `performance_measurement_valid` is false when conditions
 are unsuitable, preprocessing is unverified, or ONNX profiling is enabled.
 `valid` is true only when the run is complete, the performance measurement is

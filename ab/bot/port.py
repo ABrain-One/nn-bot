@@ -409,11 +409,12 @@ class InferenceNode(Node):
         self.output_publisher = self.create_publisher(
             Float32MultiArray, str(self.get_parameter("output_topic").value), 10
         )
+        self.image_subscription_queue_depth = 5 if self.synthetic_input else 1
         # Reliable delivery keeps the local synthetic stream's large image
         # fragments intact; physical sensor streams retain low-latency best effort.
         image_qos = QoSProfile(
             history=HistoryPolicy.KEEP_LAST,
-            depth=5 if self.synthetic_input else 1,
+            depth=self.image_subscription_queue_depth,
             reliability=(
                 ReliabilityPolicy.RELIABLE
                 if self.synthetic_input
@@ -510,7 +511,7 @@ class InferenceNode(Node):
 
     def on_image(self, message):
         # Discard initial frames after model readiness, before any timing or
-        # benchmark counters are updated. QoS depth=1 bounds any queued backlog.
+        # benchmark counters are updated. QoS depth bounds any queued backlog.
         if not self.ready:
             return
         self.last_camera_data_at = time.monotonic()
@@ -696,33 +697,29 @@ class InferenceNode(Node):
         onnxruntime_deadline_misses = int(
             sum(1 for lat in self.onnxruntime_latencies_ns if lat > deadline_ns)
         )
+        end_to_end_timing = (
+            timing_stats(self.end_to_end_latencies_ns)
+            if self.end_to_end_latencies_ns
+            else None
+        )
         if onnxruntime_timing["p99"] is not None and onnxruntime_timing["p99"] > deadline_ns:
             measurement_quality_errors.append(
                 f"ONNX Runtime p99 {onnxruntime_timing['p99'] / 1_000_000:.3f} ms "
                 f"exceeds deadline {deadline_ms:.3f} ms "
                 f"({onnxruntime_deadline_misses} samples exceeded)"
             )
+        if (
+            end_to_end_timing is not None
+            and end_to_end_timing["p99"] is not None
+            and end_to_end_timing["p99"] > deadline_ns
+        ):
+            measurement_quality_errors.append(
+                f"end-to-end p99 {end_to_end_timing['p99'] / 1_000_000:.3f} ms "
+                f"exceeds deadline {deadline_ms:.3f} ms"
+            )
         if self.gpu_preflight["busy"]:
             measurement_quality_errors.append("GPU preflight detected a busy GPU")
         measurement_quality_errors.extend(condition_warnings)
-        measurement_conditions_valid = not measurement_quality_errors
-        preprocessing_provenance_valid = self.preprocessing_manifest is not None
-        performance_quality_errors = list(measurement_quality_errors)
-        if not preprocessing_provenance_valid:
-            performance_quality_errors.append(
-                "No preprocessing manifest; legacy parameter preprocessing is not verified"
-            )
-        if self.enable_onnx_profiling:
-            performance_quality_errors.append(
-                "ONNX Runtime profiling is enabled; latency samples are diagnostic only"
-            )
-        performance_quality_errors = list(dict.fromkeys(performance_quality_errors))
-        performance_measurement_valid = not performance_quality_errors
-        active_providers = self.session.get_providers()
-        onnxruntime_profile = None
-        if self.enable_onnx_profiling:
-            profile_path = self.session.end_profiling()
-            onnxruntime_profile = summarize_onnxruntime_profile(profile_path)
         warmup_median_ns = None
         warmup_convergence_met = None
         if self.warmup_latencies_ns:
@@ -742,6 +739,24 @@ class InferenceNode(Node):
                     "Warm-up convergence check did not converge within "
                     f"{self.warmup_convergence_tolerance_percent:g}%"
                 )
+        measurement_conditions_valid = not measurement_quality_errors
+        preprocessing_provenance_valid = self.preprocessing_manifest is not None
+        performance_quality_errors = list(measurement_quality_errors)
+        if not preprocessing_provenance_valid:
+            performance_quality_errors.append(
+                "No preprocessing manifest; legacy parameter preprocessing is not verified"
+            )
+        if self.enable_onnx_profiling:
+            performance_quality_errors.append(
+                "ONNX Runtime profiling is enabled; latency samples are diagnostic only"
+            )
+        performance_quality_errors = list(dict.fromkeys(performance_quality_errors))
+        performance_measurement_valid = not performance_quality_errors
+        active_providers = self.session.get_providers()
+        onnxruntime_profile = None
+        if self.enable_onnx_profiling:
+            profile_path = self.session.end_profiling()
+            onnxruntime_profile = summarize_onnxruntime_profile(profile_path)
         record = {
             "model_name": self.model_path.stem,
             "dataset": str(self.get_parameter("dataset").value),
@@ -800,7 +815,7 @@ class InferenceNode(Node):
             "startup_drop_frames": self.startup_drop_frames,
             "startup_frames_dropped": self.startup_frames_dropped,
             "readiness_handshake": True,
-            "image_subscription_queue_depth": 1,
+            "image_subscription_queue_depth": self.image_subscription_queue_depth,
             "failed_frames": self.failed_frames,
             "clock_inconsistency_frames": self.clock_inconsistency_frames,
             "clock_error_message": self.clock_error_message,
@@ -870,11 +885,7 @@ class InferenceNode(Node):
             "output_shape": output_shape,
             "latency_ns": timing_stats(self.latencies_ns, deadline_ns=deadline_ns),
             "onnxruntime_latency_ns": timing_stats(self.onnxruntime_latencies_ns),
-            "end_to_end_latency_ns": (
-                timing_stats(self.end_to_end_latencies_ns)
-                if self.end_to_end_latencies_ns
-                else None
-            ),
+            "end_to_end_latency_ns": end_to_end_timing,
             "end_to_end_latency_scope": "image_header_stamp_to_output_publish",
             "end_to_end_header_timestamp_frames": self.end_to_end_timestamp_frames,
             "callback_latency_ns": timing_stats(self.callback_latencies_ns),

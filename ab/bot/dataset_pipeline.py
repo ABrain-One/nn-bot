@@ -844,6 +844,26 @@ def _merge_profile(model_name, args, profile):
             f'{record["clock_inconsistency_frames"]} image frame(s) had inconsistent ROS clocks'
         )
     measurement_quality_errors = list(record.get("measurement_quality_errors") or [])
+    warmup_convergence = record.get("warmup_convergence")
+    if (
+        isinstance(warmup_convergence, dict)
+        and warmup_convergence.get("converged") is False
+    ):
+        measurement_quality_errors.append(
+            "Warm-up convergence check did not converge"
+        )
+    end_to_end_timing = record.get("end_to_end_latency_ns")
+    deadline_ms = record.get("deadline_ms")
+    if (
+        isinstance(end_to_end_timing, dict)
+        and isinstance(end_to_end_timing.get("p99"), (int, float))
+        and isinstance(deadline_ms, (int, float))
+        and end_to_end_timing["p99"] > deadline_ms * 1_000_000
+    ):
+        measurement_quality_errors.append(
+            f"end-to-end p99 {end_to_end_timing['p99'] / 1_000_000:.3f} ms "
+            f"exceeds deadline {deadline_ms:.3f} ms"
+        )
     if record.get("failed_frames", 0):
         measurement_quality_errors.append(
             f'{record["failed_frames"]} image frame(s) failed during ROS inference'
