@@ -248,10 +248,10 @@ class InferenceNode(Node):
         )
         if not math.isfinite(self.camera_data_timeout) or self.camera_data_timeout <= 0:
             raise ValueError("camera_data_timeout must be finite and positive")
-        if self.synthetic_input and (
-            not math.isfinite(self.camera_rate_hz) or self.camera_rate_hz <= 0
-        ):
-            raise ValueError("camera_rate_hz must be finite and positive for synthetic input")
+        if not math.isfinite(self.camera_rate_hz) or self.camera_rate_hz < 0:
+            raise ValueError("camera_rate_hz must be finite and non-negative")
+        if self.synthetic_input and self.camera_rate_hz == 0:
+            raise ValueError("Synthetic input requires a positive camera_rate_hz")
 
         onnx_execution_mode = str(
             self.get_parameter("onnx_execution_mode").value
@@ -395,8 +395,7 @@ class InferenceNode(Node):
         self.end_to_end_timestamp_frames = 0
         self.clock_inconsistency_frames = 0
         self.clock_error_message = None
-        self.previous_synthetic_stamp_ns = None
-        self.dropped_frames = 0
+        self.frame_observations = []
         self.arrival_timestamps_ns = []
         self.cpu_telemetry_monitor = CpuTelemetryMonitor()
         self.failed_frames = 0
@@ -528,7 +527,18 @@ class InferenceNode(Node):
         callback_started_ns = time.perf_counter_ns()
         arrival_ros_ns = self.get_clock().now().nanoseconds
         source_stamp_ns = message_stamp_ns(message)
-        self.arrival_timestamps_ns.append(callback_started_ns)
+        if self.completed_warmups >= self.warmup_runs and not self.record_saved:
+            self.arrival_timestamps_ns.append(callback_started_ns)
+            observation = {
+                "source_ros_ns": source_stamp_ns or None,
+                "arrival_ros_ns": arrival_ros_ns,
+                "arrival_monotonic_ns": callback_started_ns,
+                "publish_ros_ns": None,
+                "publish_monotonic_ns": None,
+            }
+            self.frame_observations.append(observation)
+        else:
+            observation = None
         try:
             started = time.perf_counter_ns()
             image = self.bridge.imgmsg_to_cv2(message, desired_encoding="rgb8")
@@ -563,18 +573,13 @@ class InferenceNode(Node):
             elapsed_ns = time.perf_counter_ns() - started
             published_ros_ns = self.get_clock().now().nanoseconds
             callback_elapsed_ns = time.perf_counter_ns() - callback_started_ns
+            if observation is not None:
+                observation["publish_ros_ns"] = published_ros_ns
+                observation["publish_monotonic_ns"] = callback_started_ns + callback_elapsed_ns
             try:
                 header_latency_ns = header_to_publish_latency_ns(
                     source_stamp_ns, arrival_ros_ns, published_ros_ns
                 )
-                if self.synthetic_input and source_stamp_ns > 0:
-                    if self.previous_synthetic_stamp_ns is not None:
-                        self.dropped_frames += dropped_frames_between(
-                            self.previous_synthetic_stamp_ns,
-                            source_stamp_ns,
-                            self.camera_rate_hz * self.real_time_factor,
-                        )
-                    self.previous_synthetic_stamp_ns = source_stamp_ns
             except ValueError as error:
                 self.clock_inconsistency_frames += 1
                 self.clock_error_message = str(error)
@@ -643,19 +648,28 @@ class InferenceNode(Node):
             if len(self.arrival_timestamps_ns) > 1
             else None
         )
-        dropped_frames = self.dropped_frames if self.synthetic_input else None
-        dropped_frame_fraction_value = (
-            dropped_frame_fraction(dropped_frames, len(self.arrival_timestamps_ns))
-            if self.synthetic_input
-            else None
-        )
-        dropped_frame_tolerance_met = (
-            dropped_frames_within_tolerance(
-                dropped_frames, len(self.arrival_timestamps_ns)
+        stamps = [frame["source_ros_ns"] for frame in self.frame_observations]
+        usable_stamps = len(stamps) > 1 and all(stamp and stamp > 0 for stamp in stamps)
+        if usable_stamps:
+            usable_stamps = all(previous < current for previous, current in zip(stamps, stamps[1:]))
+        observed_ros_clock_factor = None
+        if self.use_sim_time and usable_stamps:
+            ros_span = self.frame_observations[-1]["arrival_ros_ns"] - self.frame_observations[0]["arrival_ros_ns"]
+            monotonic_span = self.arrival_timestamps_ns[-1] - self.arrival_timestamps_ns[0]
+            if ros_span > 0 and monotonic_span > 0:
+                observed_ros_clock_factor = ros_span / monotonic_span
+        check_camera_rate = self.measurement_mode == "frame" and self.camera_rate_hz > 0
+        dropped_frames = None
+        if check_camera_rate and usable_stamps and not self.clock_inconsistency_frames:
+            dropped_frames = sum(
+                dropped_frames_between(previous, current, self.camera_rate_hz)
+                for previous, current in zip(stamps, stamps[1:])
             )
-            if self.synthetic_input
-            else None
-        )
+        dropped_frame_fraction_value = None
+        dropped_frame_tolerance_met = None
+        if dropped_frames is not None:
+            dropped_frame_fraction_value = dropped_frame_fraction(dropped_frames, len(stamps))
+            dropped_frame_tolerance_met = dropped_frames_within_tolerance(dropped_frames, len(stamps))
         measurement_quality_errors = []
         if self.failed_frames:
             measurement_quality_errors.append(
@@ -672,27 +686,43 @@ class InferenceNode(Node):
             )
         if dropped_frames and not dropped_frame_tolerance_met:
             measurement_quality_errors.append(
-                f"{dropped_frames} estimated synthetic camera frame(s) were dropped "
+                f"{dropped_frames} estimated camera frame(s) were dropped "
                 f"({dropped_frame_fraction_value:.3%}; tolerance "
                 f"{DROPPED_FRAME_TOLERANCE_FRACTION:.3%})"
             )
-        input_rate_met = (
-            not self.synthetic_input
-            or (
-                observed_input_rate_hz is not None
-                and observed_input_rate_hz >= self.camera_rate_hz * 0.95
-            )
-        )
-        if self.synthetic_input and not input_rate_met:
-            measurement_quality_errors.append(
-                f"observed input rate {observed_input_rate_hz:.2f} Hz was below "
-                f"95% of the requested {self.camera_rate_hz:g} Hz"
-            )
-        if self.synthetic_input and self.real_time_factor != 1.0:
-            measurement_quality_errors.append(
-                f"ROS/Gazebo real-time factor is {self.real_time_factor:g}; "
-                "camera drop estimates and frame timing require independent wall-clock validation"
-            )
+        input_rate_met = None
+        if check_camera_rate:
+            if dropped_frames is None:
+                measurement_quality_errors.append(
+                    "Camera drop estimates require increasing, clock-consistent source timestamps"
+                )
+            clock_factor = observed_ros_clock_factor if self.use_sim_time else 1.0
+            if clock_factor is None or observed_input_rate_hz is None:
+                measurement_quality_errors.append("Camera wall-rate target could not be evaluated")
+            else:
+                expected_wall_rate_hz = self.camera_rate_hz * clock_factor
+                input_rate_met = observed_input_rate_hz >= expected_wall_rate_hz * 0.95
+                if not input_rate_met:
+                    measurement_quality_errors.append(
+                        f"Observed input rate {observed_input_rate_hz:.2f} Hz was below "
+                        f"95% of the expected wall rate {expected_wall_rate_hz:g} Hz"
+                    )
+        consecutive_late_publishes = 0
+        max_consecutive_late_publishes = 0
+        for frame in self.frame_observations:
+            source_ns = frame["source_ros_ns"]
+            publish_ns = frame["publish_ros_ns"]
+            if source_ns and publish_ns and source_ns <= frame["arrival_ros_ns"] <= publish_ns:
+                frame["source_to_publish_deadline_missed"] = publish_ns - source_ns > deadline_ns
+            else:
+                frame["source_to_publish_deadline_missed"] = None
+            if frame["source_to_publish_deadline_missed"]:
+                consecutive_late_publishes += 1
+                max_consecutive_late_publishes = max(
+                    max_consecutive_late_publishes, consecutive_late_publishes
+                )
+            else:
+                consecutive_late_publishes = 0
         onnxruntime_timing = timing_stats(self.onnxruntime_latencies_ns)
         onnxruntime_deadline_misses = int(
             sum(1 for lat in self.onnxruntime_latencies_ns if lat > deadline_ns)
@@ -802,13 +832,18 @@ class InferenceNode(Node):
             },
             "synthetic_input": self.synthetic_input,
             "input_source": "synthetic_camera" if self.synthetic_input else "sensor_topic",
-            "camera_rate_hz": self.camera_rate_hz if self.synthetic_input else None,
+            "camera_rate_hz": self.camera_rate_hz if check_camera_rate else None,
+            "observed_ros_clock_factor": observed_ros_clock_factor,
+            "frame_observations": self.frame_observations,
+            "dropped_frames_scope": (
+                "estimated_from_source_stamp_gaps" if dropped_frames is not None else None
+            ),
             "observed_input_rate_hz": observed_input_rate_hz,
             "input_rate_target_met": input_rate_met,
             "input_rate_tolerance_fraction": 0.95,
             "dropped_frame_fraction": dropped_frame_fraction_value,
             "dropped_frame_tolerance_fraction": (
-                DROPPED_FRAME_TOLERANCE_FRACTION if self.synthetic_input else None
+                DROPPED_FRAME_TOLERANCE_FRACTION if check_camera_rate else None
             ),
             "dropped_frame_tolerance_met": dropped_frame_tolerance_met,
             "iterations": self.iterations,
@@ -827,6 +862,16 @@ class InferenceNode(Node):
             "duration": int(round(float(np.mean(self.latencies_ns)))),
             "deadline_ms": deadline_ms,
             "deadline_missed_frames": deadline_missed_frames,
+            "pipeline_deadline_missed_frames": (
+                deadline_missed_frames if self.measurement_mode == "frame" else None
+            ),
+            "max_consecutive_late_publishes": (
+                max_consecutive_late_publishes if self.end_to_end_latencies_ns else None
+            ),
+            "source_to_publish_deadline_missed_frames": (
+                sum(latency > deadline_ns for latency in self.end_to_end_latencies_ns)
+                if self.end_to_end_latencies_ns else None
+            ),
             "missed_deadlines": deadline_missed_frames,
             "cpu_runs": None,
             "gpu_runs": None,

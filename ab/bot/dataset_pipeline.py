@@ -1049,7 +1049,7 @@ def _run_model(model_path, model_name, args):
         "warmup_convergence_tolerance_percent": args.warmup_convergence_tolerance_percent,
         "realtime_priority": args.realtime_priority,
         "lock_memory": args.lock_memory,
-        "camera_rate_hz": args.camera_rate_hz if args.emulate_camera else 0.0,
+        "camera_rate_hz": args.camera_rate_hz if args.emulate_camera else args.live_camera_rate_hz,
         "camera_data_timeout": args.camera_data_timeout,
         "warmup_runs": args.warmup_runs,
         "iterations": args.iterations,
@@ -1175,6 +1175,12 @@ def parser():
         help="Publish synthetic 640x480 RGB frames instead of requiring a camera",
     )
     ap.add_argument("--camera-rate-hz", type=float, default=30.0)
+    ap.add_argument(
+        "--live-camera-rate-hz",
+        type=float,
+        default=0.0,
+        help="Expected live-topic cadence in source-clock Hz (0 disables drop/rate estimates)",
+    )
     ap.add_argument(
         "--camera-data-timeout",
         type=float,
@@ -1309,6 +1315,8 @@ def main(args=None):
         ap.error("--startup-drop-frames cannot be negative")
     if not math.isfinite(args.camera_rate_hz) or args.camera_rate_hz <= 0:
         ap.error("--camera-rate-hz must be finite and positive")
+    if not math.isfinite(args.live_camera_rate_hz) or args.live_camera_rate_hz < 0:
+        ap.error("--live-camera-rate-hz must be finite and non-negative")
     if (
         not math.isfinite(args.gpu_utilization_limit)
         or not 0 <= args.gpu_utilization_limit <= 100
