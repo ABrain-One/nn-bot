@@ -130,6 +130,41 @@ Additional benchmark controls make duty-cycle and environment differences
 explicit. `--measurement-mode saturated` runs back-to-back `session.run()` calls;
 `--allow-spinning` permits ONNX Runtime thread spin waiting (it is disabled by
 default). `--warmup-convergence-window` enables a median convergence check.
+For CUDA measurements, enable `--onnx-provider cuda --cuda-io-binding`
+(ROS parameters `onnx_execution_mode:=cuda` and `cuda_io_binding:=true`).
+This requires CUDA-enabled PyTorch and ONNX Runtime. The ROS record reports
+`onnxruntime_cuda_stream_latency_ns` from CUDA events on ONNX Runtime's
+compute stream. The interval starts after input upload and ends before output
+download. The host-side `onnxruntime_latency_ns` includes binding and both
+transfers because this ROS pipeline takes CPU images and publishes CPU results.
+The input allocation is reused while shape and dtype stay constant. The
+`onnxruntime_cuda_input_upload_ns` and `onnxruntime_cuda_output_download_ns`
+fields report host timing for each transfer stage. The input stage includes
+contiguity checks and any allocation or rebinding. The NN-Stat duration keeps
+the host measurement and labels its scope.
+
+For sustained measurements, use `--min-measurement-seconds 30` to collect ORT
+samples until both the duration and iteration targets are met. Set a
+`--model-timeout` that covers startup, warm-up, and measurement. With
+`--warmup-convergence-window 5 --warmup-runs 15 --warmup-max-runs 60`, the
+profiler compares three consecutive five-sample medians after the first 15
+warm-ups and keeps warming up within the budget if needed. It saves a report
+with a quality error if the budget expires without convergence.
+
+`--benchmark-repeats 3` starts a fresh ROS inference process for each model
+in each round. Reports go under a new `benchmark-*/repeat-*/` directory
+inside `--results-dir`. The starting model rotates between rounds to reduce
+fixed ordering effects. For a single fresh run, use a new `--results-dir`.
+During measurement the profiler samples per-core CPU load and frequency,
+CPU temperatures, and host-wide NVIDIA utilization, temperature and clocks
+when available. GPU load samples include inference and any other workloads.
+
+For a synthetic ROS camera, pass `--cpu-affinity-cpus` and
+`--camera-cpu-affinity-cpus` with disjoint core sets. For an external camera,
+start the publisher separately with its own affinity and pass its topic via
+`--input-topic`.
+
+
 `--use-sim-time` and `--real-time-factor` record Gazebo/ROS clock information;
 `--emulator` is set by `--emulate-camera`. `--realtime-priority` requests
 `SCHED_FIFO` and `--lock-memory` requests memory locking, but the record reports
@@ -432,6 +467,46 @@ and document the environment intentionally before a controlled measurement.
 For example, use `_work/rate-sweep/15hz`, `_work/rate-sweep/20hz`, and so on as
 the four result directories; repeat each rate into a separate repeat-specific
 directory and do not overwrite or combine raw records.
+
+To measure camera-to-consumer deadlines, enable `--trace-output-frames`
+(`trace_output_frames:=true` for the standalone inference node). This appends
+the camera header's frame ID and capture timestamp to the first tensor
+dimension label. Use a benchmark output topic if existing consumers interpret
+that label. Leave tracing disabled for consumers that require the original label.
+
+At the camera publisher, log each successfully published frame with
+`write_observation(stream, frame_key(image))` from `ab.bot.frame_trace`.
+The Python synthetic camera supports this via `source_trace_path:=/path/source.jsonl`.
+At callback entry in the deployed consumer, capture the receipt time and call
+`record_receipt(stream, message, received_ns)` from the same module. A diagnostic
+subscriber can exercise the trace independently of the deployed consumer:
+
+```bash
+python -m ab.bot.frame_trace listen /nn_bot/output /path/consumer.jsonl
+python -m ab.bot.frame_trace summarize /path/source.jsonl /path/consumer.jsonl \
+    --first-frame 101 --last-frame 1000 --deadline-ms 33
+```
+
+Use matching ROS clocks at the source and consumer. Pass `--use-sim-time`
+to the listener for a simulation-time trace. Stop recording after allowing
+in-flight results to arrive, then select an inclusive source-log range that
+excludes startup and warm-up. Each image in the range must have a unique
+header frame ID and timestamp pair. The report counts missing and late
+results, including misses at the start and end of the selected source window.
+The diagnostic listener measures receipt at its own callback.
+
+To verify the trace without a robot, source ROS 2 and run the fault-injection
+test on an unused local ROS domain:
+
+```bash
+ROS_LOCALHOST_ONLY=1 ROS_DOMAIN_ID=108 NN_BOT_RUN_ROS_TESTS=1 \
+    python -m pytest -q tests/test_frame_trace_ros.py
+```
+
+The test sends seven frames through a ROS relay and the inference node. The
+relay drops three frames and delays two results beyond the 500 ms test
+deadline. The expected outcome is five total misses and a longest missed
+streak of three. The deadline is specific to this test scenario.
 
 For real-robot runs, omit `--emulate-camera` and point `--input-topic` at the
 physical camera. The record uses `synthetic_input: false`; the

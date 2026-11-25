@@ -13,6 +13,7 @@ import numpy as np
 import onnxruntime as ort
 import rclpy
 from cv_bridge import CvBridge
+from rclpy.clock import Clock, ClockType
 from rclpy.node import Node
 from rclpy.parameter import Parameter
 from rclpy.executors import ExternalShutdownException, SingleThreadedExecutor
@@ -20,6 +21,7 @@ from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPo
 from sensor_msgs.msg import Image
 from std_msgs.msg import Bool, Float32MultiArray, MultiArrayDimension
 
+from ab.bot.frame_trace import frame_key, tag_output
 from ab.bot.runtime import (
     CAMERA_DATA_TIMEOUT_EXIT_CODE,
     CpuTelemetryMonitor,
@@ -49,10 +51,13 @@ from ab.bot.runtime import (
 class InferenceNode(Node):
     def __init__(self):
         super().__init__("nn_bot_inference")
+        self.steady_clock = Clock(clock_type=ClockType.STEADY_TIME)
         self.declare_parameter("model_path", "")
         self.declare_parameter("input_topic", "/camera/image_raw")
         self.declare_parameter("camera_data_timeout", 90.0)
         self.declare_parameter("output_topic", "/nn_bot/output")
+        self.declare_parameter("trace_output_frames", False)
+        self.trace_output_frames = bool(self.get_parameter("trace_output_frames").value)
         self.declare_parameter("preprocessing_manifest", "")
         self.declare_parameter("output_normalization", "none")
         self.declare_parameter("results_dir", "stats")
@@ -60,12 +65,16 @@ class InferenceNode(Node):
         self.declare_parameter("synthetic_input", False)
         self.declare_parameter("camera_rate_hz", 0.0)
         self.declare_parameter("warmup_runs", 10)
+        self.declare_parameter("warmup_max_runs", 0)
+        self.declare_parameter("min_measurement_seconds", 0.0)
+        self.declare_parameter("camera_cpu_affinity_cpus", "")
         self.declare_parameter("iterations", 500)
         self.declare_parameter("deadline_ms", 33.0)
         self.declare_parameter("cpu_affinity", -1)
         self.declare_parameter("cpu_affinity_cpus", "")
         self.declare_parameter("onnx_num_threads", 0)
         self.declare_parameter("allow_spinning", False)
+        self.declare_parameter("cuda_io_binding", False)
         self.declare_parameter("measurement_mode", "frame")
         self.declare_parameter("warmup_convergence_window", 0)
         self.declare_parameter("warmup_convergence_tolerance_percent", 2.0)
@@ -301,8 +310,29 @@ class InferenceNode(Node):
             "session.disable_spinning",
             "1" if not allow_spinning else "0",
         )
+        self.cuda_stream = None
+        self.cuda_io_binding = bool(self.get_parameter("cuda_io_binding").value)
+        session_providers = providers
+        if self.cuda_io_binding:
+            if onnx_execution_mode != "cuda":
+                raise ValueError("cuda_io_binding requires onnx_execution_mode=cuda")
+            import torch
+
+            if not torch.cuda.is_available():
+                raise RuntimeError("cuda_io_binding requires CUDA-enabled PyTorch")
+            self.cuda_device_id = torch.cuda.current_device()
+            self.cuda_stream = torch.cuda.Stream(device=self.cuda_device_id)
+            self.cuda_start = torch.cuda.Event(enable_timing=True)
+            self.cuda_end = torch.cuda.Event(enable_timing=True)
+            session_providers = [(
+                "CUDAExecutionProvider",
+                {
+                    "device_id": self.cuda_device_id,
+                    "user_compute_stream": str(self.cuda_stream.cuda_stream),
+                },
+            )]
         self.session = ort.InferenceSession(
-            str(model_path), sess_options=session_options, providers=providers
+            str(model_path), sess_options=session_options, providers=session_providers
         )
         active_providers = self.session.get_providers()
         expected_provider = {
@@ -325,6 +355,27 @@ class InferenceNode(Node):
                 f"active providers: {', '.join(active_providers)}"
             )
         self.model_input = self.session.get_inputs()[0]
+        self.cuda_stream_latencies_ns = []
+        self.cuda_input_upload_latencies_ns = []
+        self.cuda_output_download_latencies_ns = []
+        self.cuda_device_input = None
+        self.cuda_input_signature = None
+        if self.cuda_io_binding:
+            self.session.disable_fallback()
+            self.cuda_binding = self.session.io_binding()
+            self.cuda_run_options = ort.RunOptions()
+            self.cuda_run_options.add_run_config_entry(
+                "disable_synchronize_execution_providers", "1"
+            )
+            model_outputs = self.session.get_outputs()
+            self.cuda_output_names = [output.name for output in model_outputs]
+            self.cuda_dynamic_outputs = any(
+                output.shape is None
+                or any(not isinstance(dimension, int) for dimension in output.shape)
+                for output in model_outputs
+            )
+            for name in self.cuda_output_names:
+                self.cuda_binding.bind_output(name, "cuda", self.cuda_device_id)
         input_type = str(self.model_input.type)
         numpy_dtype = {
             "tensor(float)": np.float32,
@@ -375,6 +426,21 @@ class InferenceNode(Node):
             or self.warmup_convergence_tolerance_percent < 0
         ):
             raise ValueError("warmup_convergence_tolerance_percent must be non-negative")
+        window = self.warmup_convergence_window
+        default_budget = max(self.warmup_runs, 3 * window)
+        self.warmup_max_runs = int(self.get_parameter("warmup_max_runs").value) or default_budget
+        if window == 1 or self.warmup_max_runs < max(self.warmup_runs, 3 * window):
+            raise ValueError("Warm-up window must be zero or at least two, with budget for three windows")
+        self.warmup_converged = None if window == 0 else False
+        self.camera_cpu_affinity = [
+            int(cpu) for cpu in str(self.get_parameter("camera_cpu_affinity_cpus").value).split(",")
+            if cpu
+        ]
+        self.min_measurement_seconds = float(self.get_parameter("min_measurement_seconds").value)
+        if not math.isfinite(self.min_measurement_seconds) or self.min_measurement_seconds < 0:
+            raise ValueError("min_measurement_seconds must be finite and non-negative")
+        self.measurement_started_ns = None
+        self.measurement_elapsed_ns = 0
         self.iterations = int(self.get_parameter("iterations").value)
         if self.iterations < 1:
             raise ValueError("iterations must be at least 1")
@@ -397,7 +463,7 @@ class InferenceNode(Node):
         self.clock_error_message = None
         self.frame_observations = []
         self.arrival_timestamps_ns = []
-        self.cpu_telemetry_monitor = CpuTelemetryMonitor()
+        self.cpu_telemetry_monitor = CpuTelemetryMonitor(include_machine_telemetry=True)
         self.failed_frames = 0
         self.last_frame_error = None
         self.record_saved = False
@@ -427,9 +493,12 @@ class InferenceNode(Node):
             self.on_image,
             image_qos,
         )
-        self.camera_data_timeout_timer = self.create_timer(
-            min(1.0, self.camera_data_timeout), self.check_camera_data_timeout
-        )
+        if self.measurement_mode == "frame":
+            self.camera_data_timeout_timer = self.create_timer(
+                min(1.0, self.camera_data_timeout),
+                self.check_camera_data_timeout,
+                clock=self.steady_clock,
+            )
         # Transient-local readiness lets the launcher start acquisition only after
         # the ONNX session and image subscription are ready, even if it subscribes late.
         ready_qos = QoSProfile(
@@ -445,11 +514,11 @@ class InferenceNode(Node):
         ready_message.data = True
         self.ready_publisher.publish(ready_message)
         self.ready = True
-        self.ready_timer = self.create_timer(0.1, self.publish_readiness)
+        self.ready_timer = self.create_timer(0.1, self.publish_readiness, clock=self.steady_clock)
         self.saturated_timer = None
         if self.measurement_mode == "saturated":
             self.saturated_timer = self.create_timer(
-                0.001, self.run_saturated_benchmark
+                0.001, self.run_saturated_benchmark, clock=self.steady_clock
             )
         self.get_logger().info(
             f"Loaded {model_path.name}; providers: {', '.join(active_providers)}"
@@ -470,64 +539,128 @@ class InferenceNode(Node):
                 self.ready_timer.cancel()
                 self.ready_timer = None
 
+    def warming_up(self):
+        return self.completed_warmups < self.warmup_runs or (
+            self.warmup_converged is False and self.completed_warmups < self.warmup_max_runs
+        )
+
+    def record_warmup(self, elapsed_ns):
+        self.completed_warmups += 1
+        self.warmup_latencies_ns.append(elapsed_ns)
+        window = self.warmup_convergence_window
+        if not window or self.completed_warmups < max(self.warmup_runs, 3 * window):
+            return
+        tail = self.warmup_latencies_ns[-3 * window:]
+        medians = [float(np.median(tail[i:i + window])) for i in range(0, len(tail), window)]
+        tolerance = self.warmup_convergence_tolerance_percent / 100.0
+        self.warmup_converged = all(
+            abs(current - previous) <= previous * tolerance
+            for previous, current in zip(medians, medians[1:])
+        )
+
+    def start_measurement(self):
+        self.cpu_telemetry_monitor.start()
+        self.measurement_started_ns = time.perf_counter_ns()
+
+    def measurement_complete(self):
+        self.measurement_elapsed_ns = time.perf_counter_ns() - self.measurement_started_ns
+        return (
+            len(self.latencies_ns) >= self.iterations
+            and self.measurement_elapsed_ns >= self.min_measurement_seconds * 1_000_000_000
+        )
+
     def run_saturated_benchmark(self):
         if self.record_saved:
             return
-        warmup_target = self.warmup_runs
-        measured_target = self.iterations
-        total_target = warmup_target + measured_target
-        if not hasattr(self, "saturated_completed"):
-            self.saturated_completed = 0
-
-        while self.saturated_completed < total_target:
-            started = time.perf_counter_ns()
-            outputs = self.session.run(
-                None,
-                {self.model_input.name: self.saturated_model_tensor},
+        while not self.record_saved:
+            warming_up = self.warming_up()
+            if not warming_up and not self.cpu_telemetry_monitor.started:
+                self.start_measurement()
+            outputs, elapsed_ns, cuda_timings = self.run_inference(
+                self.saturated_model_tensor
             )
-            elapsed_ns = time.perf_counter_ns() - started
-            self.saturated_completed += 1
-
-            if self.saturated_completed <= warmup_target:
-                self.warmup_latencies_ns.append(elapsed_ns)
+            if warming_up:
+                self.record_warmup(elapsed_ns)
                 continue
 
             self.latencies_ns.append(elapsed_ns)
             self.onnxruntime_latencies_ns.append(elapsed_ns)
+            if cuda_timings is not None:
+                self.record_cuda_timings(cuda_timings)
             process_model_output(outputs[0], self.output_normalization)
-            if len(self.latencies_ns) == measured_target:
+            if self.measurement_complete():
                 if self.saturated_timer is not None:
                     self.saturated_timer.cancel()
                     self.saturated_timer = None
-                self.completed_warmups = warmup_target
                 self.save_record(list(self.saturated_model_tensor.shape), list(outputs[0].shape))
                 self.record_saved = True
                 if self.get_parameter("exit_after_benchmark").value:
                     self.shutdown_timer = self.create_timer(
-                        0.1, self.stop_after_benchmark
+                        0.1, self.stop_after_benchmark, clock=self.steady_clock
                     )
                 return
+
+    def run_inference(self, model_tensor):
+        started_ns = time.perf_counter_ns()
+        if self.cuda_stream is None:
+            outputs = self.session.run(None, {self.model_input.name: model_tensor})
+            return outputs, time.perf_counter_ns() - started_ns, None
+
+        host_input = np.ascontiguousarray(model_tensor)
+        signature = (host_input.shape, host_input.dtype)
+        if signature == self.cuda_input_signature:
+            self.cuda_device_input.update_inplace(host_input)
+        else:
+            device_input = ort.OrtValue.ortvalue_from_numpy(
+                host_input, "cuda", self.cuda_device_id
+            )
+            self.cuda_binding.bind_ortvalue_input(self.model_input.name, device_input)
+            self.cuda_device_input = device_input
+            self.cuda_input_signature = signature
+        if self.cuda_dynamic_outputs:
+            # ORT retains the previous output allocation in a reused binding.
+            self.cuda_binding.clear_binding_outputs()
+            for name in self.cuda_output_names:
+                self.cuda_binding.bind_output(name, "cuda", self.cuda_device_id)
+        self.cuda_binding.synchronize_inputs()
+        uploaded_ns = time.perf_counter_ns()
+        self.cuda_start.record(self.cuda_stream)
+        try:
+            self.session.run_with_iobinding(self.cuda_binding, self.cuda_run_options)
+        finally:
+            self.cuda_end.record(self.cuda_stream)
+            self.cuda_end.synchronize()
+        cuda_elapsed_ns = round(self.cuda_start.elapsed_time(self.cuda_end) * 1_000_000)
+        download_started_ns = time.perf_counter_ns()
+        outputs = self.cuda_binding.copy_outputs_to_cpu()
+        finished_ns = time.perf_counter_ns()
+        return outputs, finished_ns - started_ns, (
+            uploaded_ns - started_ns, cuda_elapsed_ns, finished_ns - download_started_ns
+        )
+
+    def record_cuda_timings(self, timings):
+        upload_ns, stream_ns, download_ns = timings
+        self.cuda_input_upload_latencies_ns.append(upload_ns)
+        self.cuda_stream_latencies_ns.append(stream_ns)
+        self.cuda_output_download_latencies_ns.append(download_ns)
 
     def on_image(self, message):
         # Discard initial frames after model readiness, before any timing or
         # benchmark counters are updated. QoS depth bounds any queued backlog.
-        if not self.ready:
+        if not self.ready or self.measurement_mode == "saturated":
             return
         self.last_camera_data_at = time.monotonic()
         if self.startup_frames_dropped < self.startup_drop_frames:
             self.startup_frames_dropped += 1
             return
 
-        if (
-            self.completed_warmups >= self.warmup_runs
-            and not self.cpu_telemetry_monitor.started
-        ):
-            self.cpu_telemetry_monitor.start()
+        if not self.warming_up() and self.measurement_started_ns is None:
+            self.start_measurement()
 
         callback_started_ns = time.perf_counter_ns()
         arrival_ros_ns = self.get_clock().now().nanoseconds
         source_stamp_ns = message_stamp_ns(message)
-        if self.completed_warmups >= self.warmup_runs and not self.record_saved:
+        if not self.warming_up() and not self.record_saved:
             self.arrival_timestamps_ns.append(callback_started_ns)
             observation = {
                 "source_ros_ns": source_stamp_ns or None,
@@ -554,9 +687,7 @@ class InferenceNode(Node):
                     else None
                 ),
             )
-            inference_started_ns = time.perf_counter_ns()
-            outputs = self.session.run(None, {self.model_input.name: model_tensor})
-            inference_elapsed_ns = time.perf_counter_ns() - inference_started_ns
+            outputs, inference_elapsed_ns, cuda_timings = self.run_inference(model_tensor)
             output = process_model_output(outputs[0], self.output_normalization)
 
             message_out = Float32MultiArray()
@@ -569,7 +700,11 @@ class InferenceNode(Node):
                 for index, size in enumerate(output.shape)
             ]
             message_out.data = output.reshape(-1).tolist()
+            if self.trace_output_frames:
+                tag_output(message_out, frame_key(message))
             self.output_publisher.publish(message_out)
+            if self.record_saved:
+                return
             elapsed_ns = time.perf_counter_ns() - started
             published_ros_ns = self.get_clock().now().nanoseconds
             callback_elapsed_ns = time.perf_counter_ns() - callback_started_ns
@@ -586,14 +721,15 @@ class InferenceNode(Node):
                 self.get_logger().error(self.clock_error_message)
                 header_latency_ns = None
 
-            if self.completed_warmups < self.warmup_runs:
-                self.completed_warmups += 1
-                self.warmup_latencies_ns.append(inference_elapsed_ns)
+            if self.warming_up():
+                self.record_warmup(inference_elapsed_ns)
                 return
 
-            if len(self.latencies_ns) < self.iterations:
+            if not self.record_saved:
                 self.latencies_ns.append(elapsed_ns)
                 self.onnxruntime_latencies_ns.append(inference_elapsed_ns)
+                if cuda_timings is not None:
+                    self.record_cuda_timings(cuda_timings)
                 self.callback_latencies_ns.append(callback_elapsed_ns)
                 if header_latency_ns is not None:
                     self.end_to_end_latencies_ns.append(header_latency_ns)
@@ -601,11 +737,13 @@ class InferenceNode(Node):
                         arrival_ros_ns - source_stamp_ns
                     )
                     self.end_to_end_timestamp_frames += 1
-                if len(self.latencies_ns) == self.iterations and not self.record_saved:
+                if self.measurement_complete():
                     self.save_record(list(model_tensor.shape), list(output.shape))
                     self.record_saved = True
                     if self.get_parameter("exit_after_benchmark").value:
-                        self.shutdown_timer = self.create_timer(0.1, self.stop_after_benchmark)
+                        self.shutdown_timer = self.create_timer(
+                            0.1, self.stop_after_benchmark, clock=self.steady_clock
+                        )
         except Exception as error:
             self.failed_frames += 1
             self.last_frame_error = f"{type(error).__name__}: {error}"
@@ -680,7 +818,7 @@ class InferenceNode(Node):
                 f"{self.clock_inconsistency_frames} image frame(s) had inconsistent ROS clocks: "
                 f"{self.clock_error_message}"
             )
-        if len(self.latencies_ns) != self.iterations:
+        if len(self.latencies_ns) < self.iterations:
             measurement_quality_errors.append(
                 f"collected {len(self.latencies_ns)} of {self.iterations} requested inference samples"
             )
@@ -750,25 +888,13 @@ class InferenceNode(Node):
         if self.gpu_preflight["busy"]:
             measurement_quality_errors.append("GPU preflight detected a busy GPU")
         measurement_quality_errors.extend(condition_warnings)
-        warmup_median_ns = None
-        warmup_convergence_met = None
-        if self.warmup_latencies_ns:
-            warmup_stats = timing_stats(self.warmup_latencies_ns)
-            warmup_median_ns = warmup_stats["median"]
-        if self.warmup_convergence_window > 1 and len(self.warmup_latencies_ns) >= self.warmup_convergence_window:
-            tail = self.warmup_latencies_ns[-self.warmup_convergence_window:]
-            prefix = self.warmup_latencies_ns[:self.warmup_convergence_window]
-            tail_median = float(np.median(tail))
-            prefix_median = float(np.median(prefix))
-            warmup_convergence_met = (
-                abs(tail_median - prefix_median)
-                <= prefix_median * self.warmup_convergence_tolerance_percent / 100.0
+        warmup_median_ns = (
+            float(np.median(self.warmup_latencies_ns)) if self.warmup_latencies_ns else None
+        )
+        if self.warmup_converged is False:
+            measurement_quality_errors.append(
+                f"Warm-up did not converge within {self.warmup_max_runs} runs"
             )
-            if warmup_convergence_met is False:
-                measurement_quality_errors.append(
-                    "Warm-up convergence check did not converge within "
-                    f"{self.warmup_convergence_tolerance_percent:g}%"
-                )
         measurement_conditions_valid = not measurement_quality_errors
         preprocessing_provenance_valid = self.preprocessing_manifest is not None
         performance_quality_errors = list(measurement_quality_errors)
@@ -828,7 +954,9 @@ class InferenceNode(Node):
                 "window": self.warmup_convergence_window,
                 "tolerance_percent": self.warmup_convergence_tolerance_percent,
                 "median_ns": warmup_median_ns,
-                "converged": warmup_convergence_met,
+                "converged": self.warmup_converged,
+                "maximum_runs": self.warmup_max_runs,
+                "stable_window_transitions_required": 2,
             },
             "synthetic_input": self.synthetic_input,
             "input_source": "synthetic_camera" if self.synthetic_input else "sensor_topic",
@@ -847,6 +975,9 @@ class InferenceNode(Node):
             ),
             "dropped_frame_tolerance_met": dropped_frame_tolerance_met,
             "iterations": self.iterations,
+            "measured_iterations": len(self.latencies_ns),
+            "min_measurement_seconds": self.min_measurement_seconds,
+            "measurement_elapsed_seconds": self.measurement_elapsed_ns / 1_000_000_000,
             "startup_drop_frames": self.startup_drop_frames,
             "startup_frames_dropped": self.startup_frames_dropped,
             "readiness_handshake": True,
@@ -923,17 +1054,36 @@ class InferenceNode(Node):
                 }
             ),
             "input_topic": str(self.get_parameter("input_topic").value),
+            "trace_output_frames": self.trace_output_frames,
             "inference_time_scope": "image_preprocessing_through_output_publish",
-            "onnxruntime_inference_time_scope": "session_run_only",
+            "onnxruntime_inference_time_scope": (
+                "host_io_binding_upload_inference_download"
+                if self.cuda_io_binding else "session_run_only"
+            ),
             "model_size_bytes": self.model_path.stat().st_size,
             "input_shape": input_shape,
             "output_shape": output_shape,
             "latency_ns": timing_stats(self.latencies_ns, deadline_ns=deadline_ns),
             "onnxruntime_latency_ns": timing_stats(self.onnxruntime_latencies_ns),
+            "cuda_io_binding": self.cuda_io_binding,
+            "onnxruntime_cuda_stream_latency_ns": (
+                timing_stats(self.cuda_stream_latencies_ns) if self.cuda_io_binding else None
+            ),
+            "onnxruntime_cuda_stream_latency_scope": (
+                "cuda_compute_stream_with_device_io" if self.cuda_io_binding else None
+            ),
+            "onnxruntime_cuda_input_upload_ns": (
+                timing_stats(self.cuda_input_upload_latencies_ns) if self.cuda_io_binding else None
+            ),
+            "onnxruntime_cuda_output_download_ns": (
+                timing_stats(self.cuda_output_download_latencies_ns) if self.cuda_io_binding else None
+            ),
             "end_to_end_latency_ns": end_to_end_timing,
             "end_to_end_latency_scope": "image_header_stamp_to_output_publish",
             "end_to_end_header_timestamp_frames": self.end_to_end_timestamp_frames,
-            "callback_latency_ns": timing_stats(self.callback_latencies_ns),
+            "callback_latency_ns": (
+                timing_stats(self.callback_latencies_ns) if self.callback_latencies_ns else None
+            ),
             "callback_latency_scope": "callback_entry_to_output_publish",
             "source_to_callback_latency_ns": (
                 timing_stats(self.source_to_callback_latencies_ns)
@@ -956,6 +1106,7 @@ class InferenceNode(Node):
                 "ros_distro": os.environ.get("ROS_DISTRO", "unknown"),
                 "cpu_cores": os.cpu_count(),
                 "cpu_affinity": get_cpu_affinity(),
+                "camera_cpu_affinity": self.camera_cpu_affinity or None,
                 "cpu_frequencies": cpu_frequencies,
                 "cpu_frequencies_before": cpu_frequencies_before,
                 "temperatures": temperatures,
@@ -975,7 +1126,7 @@ class InferenceNode(Node):
         temporary_path = output_path.with_suffix(output_path.suffix + ".tmp")
         temporary_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
         temporary_path.replace(output_path)
-        self.get_logger().info(f"Saved {self.iterations}-frame benchmark to {output_path}")
+        self.get_logger().info(f"Saved {len(self.latencies_ns)}-sample benchmark to {output_path}")
 
     def stop_after_benchmark(self):
         if self.ready_timer is not None:

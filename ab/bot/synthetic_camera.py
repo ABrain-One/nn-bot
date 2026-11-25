@@ -7,6 +7,7 @@ from rclpy.node import Node
 from rclpy.qos import qos_profile_sensor_data
 from sensor_msgs.msg import Image
 
+from ab.bot.frame_trace import frame_key, write_observation
 from ab.bot.runtime import synthetic_rgb_frame
 
 
@@ -15,6 +16,7 @@ class SyntheticCameraNode(Node):
         super().__init__("nn_bot_synthetic_camera")
         self.declare_parameter("image_topic", "/camera/image_raw")
         self.declare_parameter("publish_rate_hz", 30.0)
+        self.declare_parameter("source_trace_path", "")
         self.declare_parameter("width", 640)
         self.declare_parameter("height", 480)
 
@@ -30,6 +32,8 @@ class SyntheticCameraNode(Node):
         self.publisher = self.create_publisher(
             Image, self.image_topic, qos_profile_sensor_data
         )
+        trace_path = self.get_parameter("source_trace_path").value
+        self.source_trace = open(trace_path, "x", encoding="utf-8") if trace_path else None
         self.timer = self.create_timer(1.0 / self.publish_rate_hz, self.publish_frame)
         self.get_logger().info(
             f"Publishing {self.width}x{self.height} RGB frames to {self.image_topic} "
@@ -48,6 +52,8 @@ class SyntheticCameraNode(Node):
         message.step = self.width * 3
         message.data = frame.tobytes()
         self.publisher.publish(message)
+        if self.source_trace is not None:
+            write_observation(self.source_trace, frame_key(message))
         self.frame_index += 1
 
 
@@ -61,6 +67,8 @@ def main(args=None):
         pass
     finally:
         if node is not None:
+            if node.source_trace is not None:
+                node.source_trace.close()
             node.destroy_node()
         if rclpy.ok():
             rclpy.shutdown()

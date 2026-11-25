@@ -18,6 +18,7 @@ import socket
 import statistics
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import numpy as np
@@ -972,7 +973,7 @@ def _nn_stat_record(record, model_name):
     inference_latency = record.get("onnxruntime_latency_ns")
     if not isinstance(inference_latency, dict) or inference_latency.get("avg") is None:
         raise ValueError(
-            "NN-Stat export requires ONNX Runtime session.run() timing samples"
+            "NN-Stat export requires ONNX Runtime host inference timing samples"
         )
     duration_ns = inference_latency["avg"]
     return {
@@ -1035,6 +1036,7 @@ def _run_model(model_path, model_name, args):
         "model_path": model_path.resolve(),
         "input_topic": args.input_topic,
         "output_topic": args.output_topic,
+        "trace_output_frames": args.trace_output_frames,
         "preprocessing_manifest": model_path.with_suffix(".preprocess.json").resolve(),
         "output_normalization": args.output_normalization,
         "results_dir": args.results_dir.resolve(),
@@ -1045,6 +1047,7 @@ def _run_model(model_path, model_name, args):
         "real_time_factor": args.real_time_factor,
         "measurement_mode": args.measurement_mode,
         "allow_spinning": args.allow_spinning,
+        "cuda_io_binding": args.cuda_io_binding,
         "warmup_convergence_window": args.warmup_convergence_window,
         "warmup_convergence_tolerance_percent": args.warmup_convergence_tolerance_percent,
         "realtime_priority": args.realtime_priority,
@@ -1052,6 +1055,9 @@ def _run_model(model_path, model_name, args):
         "camera_rate_hz": args.camera_rate_hz if args.emulate_camera else args.live_camera_rate_hz,
         "camera_data_timeout": args.camera_data_timeout,
         "warmup_runs": args.warmup_runs,
+        "warmup_max_runs": args.warmup_max_runs,
+        "min_measurement_seconds": args.min_measurement_seconds,
+        "camera_cpu_affinity_cpus": ",".join(map(str, args.camera_cpu_affinity_cpus)),
         "iterations": args.iterations,
         "startup_drop_frames": args.startup_drop_frames,
         "ready_topic": args.ready_topic,
@@ -1085,7 +1091,7 @@ def _run_model(model_path, model_name, args):
         # Start inference first. port.py loads the ONNX session, creates its
         # subscription, then publishes a transient-local ready signal.
         inference_process = subprocess.Popen(command)
-        if args.emulate_camera:
+        if args.emulate_camera and args.measurement_mode == "frame":
             ready_command = [
                 "ros2", "topic", "echo", "--once", args.ready_topic,
                 "std_msgs/msg/Bool", "--qos-durability", "transient_local",
@@ -1119,6 +1125,11 @@ def _run_model(model_path, model_name, args):
                     f"(status {inference_process.returncode})"
                 )
             camera_command = _camera_emulator_command(args)
+            if args.camera_cpu_affinity_cpus:
+                camera_command = [
+                    "taskset", "-c", ",".join(map(str, args.camera_cpu_affinity_cpus)),
+                    *camera_command,
+                ]
             print(f"[CAMERA] Starting after inference is ready: {' '.join(camera_command)}", flush=True)
             camera_publisher = subprocess.Popen(camera_command)
 
@@ -1164,6 +1175,10 @@ def parser():
     ap.add_argument("--limit", type=int, help="Limit an --all-models run (useful for a short trial)")
     ap.add_argument("--input-topic", default="/camera/image_raw")
     ap.add_argument("--output-topic", default="/nn_bot/output")
+    ap.add_argument(
+        "--trace-output-frames", action="store_true",
+        help="Append the source frame key to the first output dimension label",
+    )
     ap.add_argument(
         "--ready-topic",
         default="/nn_bot/ready",
@@ -1254,12 +1269,24 @@ def parser():
         "--warmup-convergence-window",
         type=int,
         default=0,
-        help="Check convergence across this many tail warm-ups (0 disables)",
+        help="Compare medians of three consecutive windows of this size (0 disables)",
     )
     ap.add_argument(
         "--warmup-convergence-tolerance-percent",
         type=float,
         default=2.0,
+    )
+    ap.add_argument(
+        "--warmup-max-runs", type=int, default=0,
+        help="Maximum ORT warm-ups (0 uses the larger of the minimum and three windows)",
+    )
+    ap.add_argument(
+        "--benchmark-repeats", type=int, default=1,
+        help="Repeat full benchmark rounds with fresh ORT processes and separate reports",
+    )
+    ap.add_argument(
+        "--camera-cpu-affinity-cpus", type=int, nargs="+", default=[],
+        help="Pin the launched synthetic camera to cores disjoint from ORT",
     )
     ap.add_argument(
         "--use-sim-time",
@@ -1289,6 +1316,10 @@ def parser():
         default="none",
         help="Transform model output before publishing (default: preserve raw model output)",
     )
+    ap.add_argument(
+        "--min-measurement-seconds", type=float, default=0.0,
+        help="Keep collecting ORT samples for at least this much wall time after warm-up",
+    )
     ap.add_argument("--model-timeout", type=float, default=120)
     ap.add_argument("--force", action="store_true", help="Re-export and benchmark existing results")
     return ap
@@ -1296,7 +1327,35 @@ def parser():
 
 def main(args=None):
     ap = parser()
+    ap.add_argument(
+        "--cuda-io-binding",
+        action="store_true",
+        help="Record CUDA stream latency with device-bound ONNX Runtime inputs and outputs",
+    )
     args = ap.parse_args(args)
+    if args.cuda_io_binding and args.onnx_provider != "cuda":
+        ap.error("--cuda-io-binding requires --onnx-provider cuda")
+    if not math.isfinite(args.min_measurement_seconds) or not 0 <= args.min_measurement_seconds < args.model_timeout:
+        ap.error("--min-measurement-seconds must be non-negative and less than --model-timeout")
+    if args.benchmark_repeats < 1:
+        ap.error("--benchmark-repeats must be at least 1")
+    if args.warmup_convergence_window < 0 or args.warmup_convergence_window == 1:
+        ap.error("--warmup-convergence-window must be zero or at least 2")
+    minimum_budget = max(args.warmup_runs, 3 * args.warmup_convergence_window)
+    if args.warmup_max_runs and args.warmup_max_runs < minimum_budget:
+        ap.error("--warmup-max-runs must cover --warmup-runs and three convergence windows")
+    if args.camera_cpu_affinity_cpus:
+        if not args.emulate_camera or args.measurement_mode != "frame":
+            ap.error("--camera-cpu-affinity-cpus requires a frame-driven synthetic camera")
+        inference_cpus = (
+            [args.cpu_affinity] if args.cpu_affinity is not None and args.cpu_affinity >= 0
+            else args.cpu_affinity_cpus
+        )
+        camera_cpus = set(args.camera_cpu_affinity_cpus)
+        if not inference_cpus or camera_cpus.intersection(inference_cpus):
+            ap.error("Camera affinity requires explicit disjoint inference cores")
+        if not (camera_cpus | set(inference_cpus)) <= set(get_cpu_affinity() or []):
+            ap.error("Requested camera and inference cores must be available to the launcher")
     if args.limit is not None and args.limit < 1:
         ap.error("--limit must be at least 1")
     if (
@@ -1336,16 +1395,31 @@ def main(args=None):
     if args.limit is not None:
         models = models[:args.limit]
 
-    print(f"[SETUP] {len(models)} model(s), dataset={args.dataset}")
+    repeats = 1 if args.export_only else args.benchmark_repeats
+    campaign_dir = args.results_dir
+    if repeats > 1 and models:
+        campaign_dir.mkdir(parents=True, exist_ok=True)
+        campaign_dir = Path(tempfile.mkdtemp(prefix="benchmark-", dir=campaign_dir))
+        print(f"[SETUP] Repeat reports: {campaign_dir}")
+    schedule = []
+    for repeat in range(repeats):
+        offset = repeat % len(models) if models else 0
+        schedule.extend((repeat, model) for model in models[offset:] + models[:offset])
+
+    print(f"[SETUP] {len(schedule)} benchmark(s), dataset={args.dataset}")
     completed = 0
     failed = []
     failure_reasons = {}
-    for index, model in enumerate(models, 1):
+    exported = set()
+    for index, (repeat, model) in enumerate(schedule, 1):
+        if repeats > 1:
+            args.results_dir = campaign_dir / f"repeat-{repeat + 1:03d}"
         name = model["nn"]
-        print(f"\n[{index}/{len(models)}] {name}", flush=True)
+        run_label = f"{name} (repeat {repeat + 1})" if repeats > 1 else name
+        print(f"\n[{index}/{len(schedule)}] {run_label}", flush=True)
         model_path = args.onnx_dir / args.dataset / f"{name}.onnx"
         manifest_path = model_path.with_suffix(".preprocess.json")
-        if args.force:
+        if args.force and name not in exported:
             model_path.unlink(missing_ok=True)
             manifest_path.unlink(missing_ok=True)
         try:
@@ -1366,6 +1440,7 @@ def main(args=None):
                 encoding="utf-8",
             )
             temporary_manifest_path.replace(manifest_path)
+            exported.add(name)
             if args.export_only:
                 completed += 1
                 print(f"[EXPORTED] {model_path}")
@@ -1391,21 +1466,21 @@ def main(args=None):
                 print(f"[WARN] {name}: {warning}", flush=True)
             if profile["gpu_preflight"]["busy"] and args.gpu_busy_policy == "fail":
                 print(f"[FAIL] {name}: GPU became busy before CUDA profiling", flush=True)
-                failed.append(name)
+                failed.append(run_label)
                 continue
             run_result = _run_model(model_path, name, args)
             if run_result is True:
                 if _merge_profile(name, args, profile):
                     completed += 1
                 else:
-                    failed.append(name)
+                    failed.append(run_label)
             else:
-                failed.append(name)
-                failure_reasons[name] = str(run_result)
+                failed.append(run_label)
+                failure_reasons[run_label] = str(run_result)
                 print(f"[FAIL] {name}: {run_result}", flush=True)
         except Exception as error:
             print(f"[FAIL] {name}: {error}", flush=True)
-            failed.append(name)
+            failed.append(run_label)
 
     print(f"\n[SUMMARY] successful={completed}, failed={len(failed)}")
     if failed:

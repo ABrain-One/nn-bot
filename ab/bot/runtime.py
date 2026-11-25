@@ -450,10 +450,11 @@ def sample_cpu_frequencies():
 class CpuTelemetryMonitor:
     """Sample per-core CPU utilization and frequency during a measured window."""
 
-    def __init__(self, sampling_interval_seconds=1.0):
+    def __init__(self, sampling_interval_seconds=1.0, include_machine_telemetry=False):
         if not math.isfinite(sampling_interval_seconds) or sampling_interval_seconds <= 0:
             raise ValueError("sampling_interval_seconds must be finite and positive")
         self.sampling_interval_seconds = float(sampling_interval_seconds)
+        self.include_machine_telemetry = include_machine_telemetry
         self._stop_event = threading.Event()
         self._samples_lock = threading.Lock()
         self._samples = []
@@ -536,6 +537,9 @@ class CpuTelemetryMonitor:
             "process_context_switches": process_context_switches,
             "per_core": per_core,
         }
+        if self.include_machine_telemetry and include_utilization:
+            sample["temperatures"] = sample_temperatures()
+            sample["gpus"] = sample_gpus()
         with self._samples_lock:
             self._samples.append(sample)
 
@@ -557,8 +561,9 @@ class CpuTelemetryMonitor:
                 "samples": [],
                 "sampling_errors": [],
             }
+        ended_at = time.monotonic()
         self._stop_event.set()
-        self._thread.join(timeout=self.sampling_interval_seconds + 1.0)
+        self._thread.join(timeout=self.sampling_interval_seconds + 3.0)
         if self._thread.is_alive():
             raise RuntimeError("CPU telemetry monitor did not stop")
         with self._samples_lock:
@@ -568,7 +573,7 @@ class CpuTelemetryMonitor:
             "sampling_interval_seconds": self.sampling_interval_seconds,
             "sample_count": len(samples),
             "measurement_window_seconds": (
-                time.monotonic() - self._started_at
+                ended_at - self._started_at
             ),
             "frequency_samples_are_diagnostic_only": True,
             "samples": samples,
@@ -762,7 +767,7 @@ def sample_gpus():
         return None
     query = (
         "--query-gpu=index,name,driver_version,memory.total,memory.used,"
-        "memory.free,utilization.gpu,temperature.gpu --format=csv,noheader,nounits"
+        "memory.free,utilization.gpu,temperature.gpu,clocks.current.graphics,clocks.current.memory --format=csv,noheader,nounits"
     )
     try:
         result = subprocess.run(
@@ -781,7 +786,7 @@ def sample_gpus():
         if len(fields) < 7:
             continue
         try:
-            parse_number = lambda value: None if value.upper() == "N/A" else int(value)
+            parse_number = lambda value: None if value.upper() in {"N/A", "[N/A]", "[NOT SUPPORTED]"} else int(value)
             gpus.append(
                 {
                     "index": int(fields[0]),
@@ -792,6 +797,8 @@ def sample_gpus():
                     "memory_free_mb": parse_number(fields[5]),
                     "util_percent": parse_number(fields[6]),
                     "temperature_c": parse_number(fields[7]) if len(fields) > 7 else None,
+                    "graphics_clock_mhz": parse_number(fields[8]) if len(fields) > 8 else None,
+                    "memory_clock_mhz": parse_number(fields[9]) if len(fields) > 9 else None,
                 }
             )
         except ValueError:
