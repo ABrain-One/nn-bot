@@ -586,8 +586,6 @@ class InferenceNode(Node):
         )
 
     def run_saturated_benchmark(self):
-        if self.record_saved:
-            return
         while not self.record_saved:
             warming_up = self.warming_up()
             if not warming_up and not self.cpu_telemetry_monitor.started:
@@ -608,13 +606,7 @@ class InferenceNode(Node):
                 if self.saturated_timer is not None:
                     self.saturated_timer.cancel()
                     self.saturated_timer = None
-                self.save_record(list(self.saturated_model_tensor.shape), list(outputs[0].shape))
-                self.record_saved = True
-                if self.get_parameter("exit_after_benchmark").value:
-                    self.shutdown_timer = self.create_timer(
-                        0.1, self.stop_after_benchmark, clock=self.steady_clock
-                    )
-                return
+                self.finish_benchmark(self.saturated_model_tensor.shape, outputs[0].shape)
 
     def run_inference(self, model_tensor):
         started_ns = time.perf_counter_ns()
@@ -673,13 +665,16 @@ class InferenceNode(Node):
             self.startup_frames_dropped += 1
             return
 
-        if not self.warming_up() and self.measurement_started_ns is None:
+        warming_up = self.warming_up()
+        measuring = not warming_up and not self.record_saved
+        if measuring and self.measurement_started_ns is None:
             self.start_measurement()
 
         callback_started_ns = time.perf_counter_ns()
         arrival_ros_ns = self.get_clock().now().nanoseconds
-        source_stamp_ns = message_stamp_ns(message)
-        if not self.warming_up() and not self.record_saved:
+        source_stamp_ns = key[1] if key is not None else message_stamp_ns(message)
+        observation = None
+        if measuring:
             self.arrival_timestamps_ns.append(callback_started_ns)
             observation = {
                 "source_ros_ns": source_stamp_ns or None,
@@ -689,8 +684,6 @@ class InferenceNode(Node):
                 "publish_monotonic_ns": None,
             }
             self.frame_observations.append(observation)
-        else:
-            observation = None
         published = False
         try:
             started = time.perf_counter_ns()
@@ -742,29 +735,21 @@ class InferenceNode(Node):
                 self.get_logger().error(self.clock_error_message)
                 header_latency_ns = None
 
-            if self.warming_up():
+            if warming_up:
                 self.record_warmup(inference_elapsed_ns)
                 return
 
-            if not self.record_saved:
-                self.latencies_ns.append(elapsed_ns)
-                self.onnxruntime_latencies_ns.append(inference_elapsed_ns)
-                if cuda_timings is not None:
-                    self.record_cuda_timings(cuda_timings)
-                self.callback_latencies_ns.append(callback_elapsed_ns)
-                if header_latency_ns is not None:
-                    self.end_to_end_latencies_ns.append(header_latency_ns)
-                    self.source_to_callback_latencies_ns.append(
-                        arrival_ros_ns - source_stamp_ns
-                    )
-                    self.end_to_end_timestamp_frames += 1
-                if self.measurement_complete():
-                    self.save_record(list(model_tensor.shape), list(output.shape))
-                    self.record_saved = True
-                    if self.get_parameter("exit_after_benchmark").value:
-                        self.shutdown_timer = self.create_timer(
-                            0.1, self.stop_after_benchmark, clock=self.steady_clock
-                        )
+            self.latencies_ns.append(elapsed_ns)
+            self.onnxruntime_latencies_ns.append(inference_elapsed_ns)
+            if cuda_timings is not None:
+                self.record_cuda_timings(cuda_timings)
+            self.callback_latencies_ns.append(callback_elapsed_ns)
+            if header_latency_ns is not None:
+                self.end_to_end_latencies_ns.append(header_latency_ns)
+                self.source_to_callback_latencies_ns.append(arrival_ros_ns - source_stamp_ns)
+                self.end_to_end_timestamp_frames += 1
+            if self.measurement_complete():
+                self.finish_benchmark(model_tensor.shape, output.shape)
         except Exception as error:
             self.failed_frames += 1
             self.last_frame_error = f"{type(error).__name__}: {error}"
@@ -1152,6 +1137,14 @@ class InferenceNode(Node):
         temporary_path.write_text(json.dumps(record, indent=2) + "\n", encoding="utf-8")
         temporary_path.replace(output_path)
         self.get_logger().info(f"Saved {len(self.latencies_ns)}-sample benchmark to {output_path}")
+
+    def finish_benchmark(self, input_shape, output_shape):
+        self.save_record(list(input_shape), list(output_shape))
+        self.record_saved = True
+        if self.get_parameter("exit_after_benchmark").value:
+            self.shutdown_timer = self.create_timer(
+                0.1, self.stop_after_benchmark, clock=self.steady_clock
+            )
 
     def stop_after_benchmark(self):
         if self.ready_timer is not None:

@@ -152,31 +152,22 @@ def test_ros_frame_trace_reports_injected_drops_and_deadline_misses(tmp_path):
             elif index != 1:
                 _spin_until(executor, lambda: index in results, f"consumer result {index}")
 
-        # Warm up the real inference path before starting the source window.
-        publish(0)
-        source_log.seek(0)
-        source_log.truncate()
-        receipt_log.seek(0)
-        receipt_log.truncate()
-        results.clear()
-        forwarded.clear()
-        deliveries.clear()
-
-        for index in range(1, 8):
+        # Frame zero warms up inference. Only frames one through seven are scored.
+        for index in range(8):
             publish(index)
 
         executor.remove_node(inference)
         inference.destroy_node()
         inference = None
         report = summarize_frames(
-            map(json.loads, source_log.getvalue().splitlines()),
+            map(json.loads, source_log.getvalue().splitlines()[1:]),
             map(json.loads, receipt_log.getvalue().splitlines()),
             deadline_ns,
             inference_rows=read_observations(inference_log),
         )
-        assert forwarded == [2, 3, 4, 5, 6, 7]
-        assert deliveries == [2, 3, 5, 6, 7]
-        assert results == [2, 3, 5, 6]
+        assert forwarded == [0, 2, 3, 4, 5, 6, 7]
+        assert deliveries == [0, 2, 3, 5, 6, 7]
+        assert results == [0, 2, 3, 5, 6]
         assert report["source_frames"] == 7
         assert report["received_frames"] == 4
         assert report["missing_frames"] == 3

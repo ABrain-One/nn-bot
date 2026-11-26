@@ -1032,17 +1032,11 @@ def _run_model(model_path, model_name, args):
     if args.force:
         report_path.unlink(missing_ok=True)
 
-    inference_trace_path = ""
-    if args.trace_output_frames and args.measurement_mode == "frame":
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        trace_dir = Path(tempfile.mkdtemp(prefix="frame-trace-", dir=report_path.parent.resolve()))
-        inference_trace_path = trace_dir / "inference.jsonl"
     params = {
         "model_path": model_path.resolve(),
         "input_topic": args.input_topic,
         "output_topic": args.output_topic,
         "trace_output_frames": args.trace_output_frames,
-        "inference_trace_path": inference_trace_path,
         "preprocessing_manifest": model_path.with_suffix(".preprocess.json").resolve(),
         "output_normalization": args.output_normalization,
         "results_dir": args.results_dir.resolve(),
@@ -1079,6 +1073,10 @@ def _run_model(model_path, model_name, args):
         "enable_onnx_profiling": args.enable_onnx_profiling,
         "exit_after_benchmark": True,
     }
+    if args.trace_output_frames and args.measurement_mode == "frame":
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        trace_dir = tempfile.mkdtemp(prefix="frame-trace-", dir=report_path.parent.resolve())
+        params["inference_trace_path"] = Path(trace_dir) / "inference.jsonl"
     command = _inference_command()
     for key, value in params.items():
         if value == "":

@@ -52,13 +52,11 @@ def summarize_frames(source_rows, consumer_rows, deadline_ns, *, inference_rows=
         receipts[key] = min(timestamp, receipts.get(key, timestamp))
 
     samples = []
-    missing = late = streak = longest_streak = 0
+    late = streak = longest_streak = 0
     for key in source_keys:
         receipt = receipts.get(key)
-        if receipt is None:
-            missing += 1
-            missed = True
-        else:
+        missed = receipt is None
+        if receipt is not None:
             latency = receipt - key[1]
             if latency < 0:
                 raise ValueError("Receipt precedes capture. Verify camera and consumer clocks.")
@@ -76,6 +74,7 @@ def summarize_frames(source_rows, consumer_rows, deadline_ns, *, inference_rows=
     latency = timing_stats(samples) if samples else None
     if latency is not None:
         latency.pop("samples")
+    missing = len(source_keys) - len(samples)
     report = {
         "source_frames": len(source_keys),
         "observed_source_rate_hz": source_rate_hz,
@@ -89,13 +88,12 @@ def summarize_frames(source_rows, consumer_rows, deadline_ns, *, inference_rows=
     }
     if inference_rows is not None:
         source_window = set(source_keys)
-        stages = {"arrival": set(), "publish": set()}
+        arrived, published = set(), set()
+        stages = {"arrival": arrived, "publish": published}
         for row in inference_rows:
             key = tuple(row["frame_key"])
             if key in source_window:
                 stages[row["stage"]].add(key)
-        arrived = stages["arrival"]
-        published = stages["publish"]
         received = receipts.keys() & source_window
         if not (received <= published <= arrived):
             raise ValueError(
