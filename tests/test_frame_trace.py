@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from ab.bot.frame_trace import record_receipt, summarize_frames, tag_output
+from ab.bot.frame_trace import main, record_receipt, summarize_frames, tag_output, write_observation
 
 
 def test_frame_trace_counts_edge_losses_and_uses_first_receipt():
@@ -32,3 +32,44 @@ def test_frame_trace_rejects_ambiguous_source_keys_and_negative_latency():
         summarize_frames([source, source], [], 50)
     with pytest.raises(ValueError, match="precedes capture"):
         summarize_frames([source], [{**source, "received_ns": 99}], 50)
+
+
+def test_frame_trace_cli_uses_the_same_source_window_at_every_stage(tmp_path, monkeypatch, capsys):
+    source_path, inference_path, consumer_path = (
+        tmp_path / name for name in ("source.jsonl", "inference.jsonl", "consumer.jsonl")
+    )
+    first, selected = ("camera", 100), ("camera", 200)
+    with source_path.open("w") as stream:
+        write_observation(stream, first)
+        write_observation(stream, selected)
+    with inference_path.open("w") as stream:
+        write_observation(stream, selected, stage="arrival")
+        write_observation(stream, selected, stage="arrival")
+        write_observation(stream, selected, stage="publish")
+    with consumer_path.open("w") as stream:
+        write_observation(stream, first, received_ns=150)
+        write_observation(stream, selected, received_ns=250)
+    monkeypatch.setattr("sys.argv", [
+        "frame_trace", "summarize", str(source_path), str(consumer_path),
+        "--inference-log", str(inference_path), "--first-frame", "2",
+        "--last-frame", "2", "--deadline-ms", "33",
+    ])
+    main()
+    report = json.loads(capsys.readouterr().out)
+    assert report["received_frames"] == 1
+    assert report["inference_stages"] == {
+        "arrived_frames": 1,
+        "published_frames": 1,
+        "missing_before_inference": 0,
+        "missing_before_publish": 0,
+        "missing_after_publish": 0,
+    }
+
+
+def test_frame_trace_rejects_missing_upstream_observations():
+    source = {"frame_key": ("camera", 100)}
+    with pytest.raises(ValueError, match="missing upstream events"):
+        summarize_frames(
+            [source], [{**source, "received_ns": 150}], 50,
+            inference_rows=[{**source, "stage": "arrival"}],
+        )

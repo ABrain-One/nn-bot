@@ -38,7 +38,7 @@ def record_receipt(stream, message, received_ns):
         write_observation(stream, key, received_ns=received_ns)
 
 
-def summarize_frames(source_rows, consumer_rows, deadline_ns):
+def summarize_frames(source_rows, consumer_rows, deadline_ns, *, inference_rows=None):
     """Use source log order as the denominator and the earliest receipt per frame."""
     source_keys = [tuple(row["frame_key"]) for row in source_rows]
     if not source_keys or len(set(source_keys)) != len(source_keys):
@@ -76,7 +76,7 @@ def summarize_frames(source_rows, consumer_rows, deadline_ns):
     latency = timing_stats(samples) if samples else None
     if latency is not None:
         latency.pop("samples")
-    return {
+    report = {
         "source_frames": len(source_keys),
         "observed_source_rate_hz": source_rate_hz,
         "received_frames": len(samples),
@@ -87,6 +87,34 @@ def summarize_frames(source_rows, consumer_rows, deadline_ns):
         "deadline_ns": deadline_ns,
         "camera_to_consumer_latency_ns": latency,
     }
+    if inference_rows is not None:
+        source_window = set(source_keys)
+        stages = {"arrival": set(), "publish": set()}
+        for row in inference_rows:
+            key = tuple(row["frame_key"])
+            if key in source_window:
+                stages[row["stage"]].add(key)
+        arrived = stages["arrival"]
+        published = stages["publish"]
+        received = receipts.keys() & source_window
+        if not (received <= published <= arrived):
+            raise ValueError(
+                "Frame observations are missing upstream events. Verify that the "
+                "inference and consumer logs cover the same source window."
+            )
+        report["inference_stages"] = {
+            "arrived_frames": len(arrived),
+            "published_frames": len(published),
+            "missing_before_inference": len(source_window - arrived),
+            "missing_before_publish": len(arrived - published),
+            "missing_after_publish": len(published - received),
+        }
+    return report
+
+
+def read_observations(path):
+    with path.open(encoding="utf-8") as stream:
+        yield from map(json.loads, stream)
 
 
 def listen(args):
@@ -124,6 +152,7 @@ def main():
     summary = commands.add_parser("summarize", help="Compare a source frame window to receipt logs")
     summary.add_argument("source_log", type=Path)
     summary.add_argument("consumer_log", type=Path)
+    summary.add_argument("--inference-log", type=Path, help="Inference arrival and publish trace")
     summary.add_argument("--deadline-ms", type=float, required=True)
     summary.add_argument("--first-frame", type=int, required=True, help="First source log row, one-based")
     summary.add_argument("--last-frame", type=int, required=True, help="Last source log row, inclusive")
@@ -138,17 +167,17 @@ def main():
     if not math.isfinite(args.deadline_ms) or args.deadline_ms <= 0:
         parser.error("--deadline-ms must be finite and positive")
     try:
-        sources = [json.loads(line) for line in args.source_log.read_text().splitlines()]
+        sources = list(read_observations(args.source_log))
         if not 1 <= args.first_frame <= args.last_frame <= len(sources):
             parser.error("Select an inclusive frame range within the source log")
         if len({tuple(row["frame_key"]) for row in sources}) != len(sources):
             parser.error("Source frame keys must be unique throughout the log")
-        with args.consumer_log.open() as stream:
-            report = summarize_frames(
-                sources[args.first_frame - 1:args.last_frame],
-                (json.loads(line) for line in stream),
-                round(args.deadline_ms * 1_000_000),
-            )
+        report = summarize_frames(
+            sources[args.first_frame - 1:args.last_frame],
+            read_observations(args.consumer_log),
+            round(args.deadline_ms * 1_000_000),
+            inference_rows=read_observations(args.inference_log) if args.inference_log else None,
+        )
     except (OSError, ValueError, KeyError, TypeError) as error:
         parser.error(str(error))
     print(json.dumps(report, indent=2))

@@ -21,7 +21,7 @@ from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPo
 from sensor_msgs.msg import Image
 from std_msgs.msg import Bool, Float32MultiArray, MultiArrayDimension
 
-from ab.bot.frame_trace import frame_key, tag_output
+from ab.bot.frame_trace import frame_key, tag_output, write_observation
 from ab.bot.runtime import (
     CAMERA_DATA_TIMEOUT_EXIT_CODE,
     CpuTelemetryMonitor,
@@ -58,6 +58,9 @@ class InferenceNode(Node):
         self.declare_parameter("output_topic", "/nn_bot/output")
         self.declare_parameter("trace_output_frames", False)
         self.trace_output_frames = bool(self.get_parameter("trace_output_frames").value)
+        self.declare_parameter("inference_trace_path", "")
+        self.inference_trace_path = self.get_parameter("inference_trace_path").value
+        self.inference_trace = None
         self.declare_parameter("preprocessing_manifest", "")
         self.declare_parameter("output_normalization", "none")
         self.declare_parameter("results_dir", "stats")
@@ -218,6 +221,10 @@ class InferenceNode(Node):
         ).lower()
         if self.measurement_mode not in {"frame", "saturated"}:
             raise ValueError("measurement_mode must be 'frame' or 'saturated'")
+        if self.inference_trace_path and (
+            self.measurement_mode != "frame" or not self.trace_output_frames
+        ):
+            raise ValueError("inference_trace_path requires frame mode and trace_output_frames")
         self.real_time_factor = float(
             self.get_parameter("real_time_factor").value
         )
@@ -510,6 +517,8 @@ class InferenceNode(Node):
         self.ready_publisher = self.create_publisher(
             Bool, str(self.get_parameter("ready_topic").value), ready_qos
         )
+        if self.inference_trace_path:
+            self.inference_trace = open(self.inference_trace_path, "x", encoding="utf-8")
         ready_message = Bool()
         ready_message.data = True
         self.ready_publisher.publish(ready_message)
@@ -527,6 +536,13 @@ class InferenceNode(Node):
             f"[NN_BOT_READY] model/session initialized; subscribed to "
             f"{self.input_topic}"
         )
+
+    def destroy_node(self):
+        try:
+            return super().destroy_node()
+        finally:
+            if self.inference_trace is not None:
+                self.inference_trace.close()
 
     def publish_readiness(self):
         if not self.ready:
@@ -649,6 +665,9 @@ class InferenceNode(Node):
         # benchmark counters are updated. QoS depth bounds any queued backlog.
         if not self.ready or self.measurement_mode == "saturated":
             return
+        key = frame_key(message) if self.trace_output_frames else None
+        if self.inference_trace is not None:
+            write_observation(self.inference_trace, key, stage="arrival")
         self.last_camera_data_at = time.monotonic()
         if self.startup_frames_dropped < self.startup_drop_frames:
             self.startup_frames_dropped += 1
@@ -672,6 +691,7 @@ class InferenceNode(Node):
             self.frame_observations.append(observation)
         else:
             observation = None
+        published = False
         try:
             started = time.perf_counter_ns()
             image = self.bridge.imgmsg_to_cv2(message, desired_encoding="rgb8")
@@ -700,9 +720,10 @@ class InferenceNode(Node):
                 for index, size in enumerate(output.shape)
             ]
             message_out.data = output.reshape(-1).tolist()
-            if self.trace_output_frames:
-                tag_output(message_out, frame_key(message))
+            if key is not None:
+                tag_output(message_out, key)
             self.output_publisher.publish(message_out)
+            published = True
             if self.record_saved:
                 return
             elapsed_ns = time.perf_counter_ns() - started
@@ -748,6 +769,9 @@ class InferenceNode(Node):
             self.failed_frames += 1
             self.last_frame_error = f"{type(error).__name__}: {error}"
             self.get_logger().error(f"Inference failed: {error}")
+        finally:
+            if published and self.inference_trace is not None:
+                write_observation(self.inference_trace, key, stage="publish")
 
     def check_camera_data_timeout(self):
         if time.monotonic() - self.last_camera_data_at < self.camera_data_timeout:
@@ -1055,6 +1079,7 @@ class InferenceNode(Node):
             ),
             "input_topic": str(self.get_parameter("input_topic").value),
             "trace_output_frames": self.trace_output_frames,
+            "inference_trace_path": self.inference_trace_path or None,
             "inference_time_scope": "image_preprocessing_through_output_publish",
             "onnxruntime_inference_time_scope": (
                 "host_io_binding_upload_inference_download"

@@ -10,6 +10,7 @@ import pytest
 from ab.bot.frame_trace import (
     frame_key,
     output_frame_key,
+    read_observations,
     record_receipt,
     summarize_frames,
     write_observation,
@@ -54,9 +55,9 @@ def test_ros_frame_trace_reports_injected_drops_and_deadline_misses(tmp_path):
     from ab.bot.port import InferenceNode
 
     model = tmp_path / "frame_trace.onnx"
+    inference_log = tmp_path / "inference.jsonl"
     _write_test_model(model)
     deadline_ns = 500_000_000
-    dropped = {1, 4, 7}
     delayed = {3, 5}
     namespace = f"/nn_bot_trace_test_{os.getpid()}"
     source_topic = f"{namespace}/camera"
@@ -73,6 +74,7 @@ def test_ros_frame_trace_reports_injected_drops_and_deadline_misses(tmp_path):
         "-p", "onnx_execution_mode:=cpu",
         "-p", "onnx_num_threads:=1",
         "-p", "trace_output_frames:=true",
+        "-p", f"inference_trace_path:={inference_log}",
         "-p", "startup_drop_frames:=0",
         "-p", "warmup_runs:=1",
         "-p", "iterations:=4",
@@ -92,11 +94,12 @@ def test_ros_frame_trace_reports_injected_drops_and_deadline_misses(tmp_path):
         forwarded = []
         results = []
         arrivals = []
+        deliveries = []
 
         def relay(image):
             index = frames_by_key[frame_key(image)]
             arrivals.append(index)
-            if index not in dropped:
+            if index != 1:
                 relay_pub.publish(image)
                 forwarded.append(index)
 
@@ -113,6 +116,9 @@ def test_ros_frame_trace_reports_injected_drops_and_deadline_misses(tmp_path):
 
         def deliver(output):
             index = frames_by_key[output_frame_key(output)]
+            deliveries.append(index)
+            if index == 7:
+                return
             if index in delayed:
                 time.sleep(0.65)
             delivery_pub.publish(output)
@@ -129,7 +135,8 @@ def test_ros_frame_trace_reports_injected_drops_and_deadline_misses(tmp_path):
 
         def publish(index):
             image = Image(
-                height=8, width=8, encoding="rgb8", step=24, data=bytes([index]) * 192
+                height=8, width=8, encoding="invalid" if index == 4 else "rgb8",
+                step=24, data=bytes([index]) * 192,
             )
             image.header.frame_id = "test_camera"
             image.header.stamp = fixture.get_clock().now().to_msg()
@@ -138,7 +145,11 @@ def test_ros_frame_trace_reports_injected_drops_and_deadline_misses(tmp_path):
             source_pub.publish(image)
             write_observation(source_log, key)
             _spin_until(executor, lambda: index in arrivals, f"source frame {index}")
-            if index not in dropped:
+            if index == 4:
+                _spin_until(executor, lambda: inference.failed_frames == 1, "inference failure")
+            elif index == 7:
+                _spin_until(executor, lambda: index in deliveries, "result before output drop")
+            elif index != 1:
                 _spin_until(executor, lambda: index in results, f"consumer result {index}")
 
         # Warm up the real inference path before starting the source window.
@@ -149,16 +160,23 @@ def test_ros_frame_trace_reports_injected_drops_and_deadline_misses(tmp_path):
         receipt_log.truncate()
         results.clear()
         forwarded.clear()
+        deliveries.clear()
 
         for index in range(1, 8):
             publish(index)
 
+        executor.remove_node(inference)
+        inference.destroy_node()
+        inference = None
         report = summarize_frames(
             map(json.loads, source_log.getvalue().splitlines()),
             map(json.loads, receipt_log.getvalue().splitlines()),
             deadline_ns,
+            inference_rows=read_observations(inference_log),
         )
-        assert forwarded == results == [2, 3, 5, 6]
+        assert forwarded == [2, 3, 4, 5, 6, 7]
+        assert deliveries == [2, 3, 5, 6, 7]
+        assert results == [2, 3, 5, 6]
         assert report["source_frames"] == 7
         assert report["received_frames"] == 4
         assert report["missing_frames"] == 3
@@ -166,6 +184,13 @@ def test_ros_frame_trace_reports_injected_drops_and_deadline_misses(tmp_path):
         assert report["deadline_missed_frames"] == 5
         assert report["max_consecutive_missed_frames"] == 3
         assert report["camera_to_consumer_latency_ns"]["max"] >= 650_000_000
+        assert report["inference_stages"] == {
+            "arrived_frames": 6,
+            "published_frames": 5,
+            "missing_before_inference": 1,
+            "missing_before_publish": 1,
+            "missing_after_publish": 1,
+        }
     finally:
         executor.shutdown()
         for node in (fixture, inference):

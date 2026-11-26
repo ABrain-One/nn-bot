@@ -495,6 +495,21 @@ header frame ID and timestamp pair. The report counts missing and late
 results, including misses at the start and end of the selected source window.
 The diagnostic listener measures receipt at its own callback.
 
+For stage-by-stage frame counts, add
+`-p inference_trace_path:=/path/inference.jsonl` to the frame-driven inference
+node with `trace_output_frames:=true`. Use a new path for each run. The
+dataset pipeline's `--trace-output-frames` option saves this log automatically
+in a fresh directory beside each model's benchmark report in frame mode. The
+report records the log path in `inference_trace_path`.
+
+Stop the inference node cleanly to finish writing the log, then add
+`--inference-log /path/inference.jsonl` to the summarize command. The
+`inference_stages` section shows how many source frames never entered the
+inference callback, reached inference without a result publish, or were
+published without reaching the consumer. Select a source window after startup
+and warm-up so intentional startup drops are excluded. Trace logging adds
+work to the callback, so record whether it was enabled when comparing runs.
+
 To verify the trace without a robot, source ROS 2 and run the fault-injection
 test on an unused local ROS domain:
 
@@ -503,10 +518,11 @@ ROS_LOCALHOST_ONLY=1 ROS_DOMAIN_ID=108 NN_BOT_RUN_ROS_TESTS=1 \
     python -m pytest -q tests/test_frame_trace_ros.py
 ```
 
-The test sends seven frames through a ROS relay and the inference node. The
-relay drops three frames and delays two results beyond the 500 ms test
-deadline. The expected outcome is five total misses and a longest missed
-streak of three. The deadline is specific to this test scenario.
+The test sends seven frames through a ROS relay and the inference node. It
+drops one frame before inference, injects one invalid image that produces no
+result, drops one result after publication, and delays two results beyond the
+500 ms test deadline. The expected outcome is five total misses and a longest
+missed streak of three. The deadline is specific to this test scenario.
 
 For real-robot runs, omit `--emulate-camera` and point `--input-topic` at the
 physical camera. The record uses `synthetic_input: false`; the
