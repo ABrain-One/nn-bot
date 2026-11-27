@@ -313,7 +313,7 @@ def _replace_adaptive_avg_pools(model, torch):
             _replace_adaptive_avg_pools(child, torch)
 
 
-def export_model(model_row, output_path, hf_hub_download):
+def export_model(model_row, output_path, hf_hub_download, *, preserve_batchnorm=False):
     import torch
     import onnx
 
@@ -330,6 +330,8 @@ def export_model(model_row, output_path, hf_hub_download):
     }
     if "dynamo" in inspect.signature(torch.onnx.export).parameters:
         export_options["dynamo"] = False
+    if preserve_batchnorm:
+        export_options["do_constant_folding"] = False
     torch.onnx.export(model, torch.randn(input_shape), str(output_path), **export_options)
     onnx.checker.check_model(onnx.load(str(output_path)))
     return output_path
@@ -1232,6 +1234,10 @@ def parser():
     ap.add_argument("--results-dir", type=Path, default=Path("stats"))
     ap.add_argument("--export-only", action="store_true", help="Export ONNX files without starting ROS inference")
     ap.add_argument("--warmup-runs", type=int, default=10)
+    ap.add_argument(
+        "--preserve-batchnorm", action="store_true",
+        help="Disable exporter constant folding for an export-only fusion experiment",
+    )
     ap.add_argument("--iterations", type=int, default=500)
     ap.add_argument(
         "--deadline-ms",
@@ -1337,6 +1343,8 @@ def main(args=None):
         help="Record CUDA stream latency with device-bound ONNX Runtime inputs and outputs",
     )
     args = ap.parse_args(args)
+    if args.preserve_batchnorm and not args.export_only:
+        ap.error("--preserve-batchnorm requires --export-only")
     if args.cuda_io_binding and args.onnx_provider != "cuda":
         ap.error("--cuda-io-binding requires --onnx-provider cuda")
     if not math.isfinite(args.min_measurement_seconds) or not 0 <= args.min_measurement_seconds < args.model_timeout:
@@ -1433,8 +1441,12 @@ def main(args=None):
                 input_mean=args.input_mean,
                 input_std=args.input_std,
             )
+            if args.preserve_batchnorm and model_path.exists():
+                raise FileExistsError(f"Choose a fresh --onnx-dir for the unfused export: {model_path}")
             if not model_path.exists():
-                export_model(model, model_path, hf_hub_download)
+                export_model(
+                    model, model_path, hf_hub_download, preserve_batchnorm=args.preserve_batchnorm
+                )
             temporary_manifest_path = manifest_path.with_suffix(
                 manifest_path.suffix + ".tmp"
             )

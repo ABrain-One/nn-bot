@@ -287,6 +287,29 @@ aggregated = process_data(pd.read_csv(
 ))
 ```
 
+## Convolution and Batch Normalization Fusion Experiment
+
+The normal exporter can already fold batch normalization. Export a separate
+baseline with exporter constant folding disabled, then run the standalone CPU
+comparison from the project environment:
+
+```bash
+python -m ab.bot.dataset_pipeline --model AirNet --dataset cifar-10 \
+    --export-only --preserve-batchnorm --onnx-dir _work/unfused-export
+python -m ab.bot.onnx_fusion _work/unfused-export/cifar-10/AirNet.onnx \
+    _work/unfused-export/cifar-10/AirNet-folded.onnx > fusion-comparison.json
+```
+
+The pass folds inference-only Conv–BatchNormalization pairs with constant
+parameters when the intermediate convolution output has no other consumer.
+It saves a new model only after checking output agreement on fixed generated
+inputs. The comparison reports host inference latency with one, two, and four
+CPU threads, both with ONNX Runtime graph optimizations enabled and disabled.
+Each setting reports the median of the per-repeat p99 values. Use the
+optimization-enabled rows for comparison against the normal runtime. These
+measurements cover inference calls on generated inputs. ROS replay is a
+separate experiment for camera-to-consumer latency and deadline misses.
+
 ## Run NN-Dataset Models
 
 Build and source the ROS package in the same shell:
