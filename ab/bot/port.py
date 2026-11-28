@@ -653,11 +653,10 @@ class InferenceNode(Node):
         self.cuda_output_download_latencies_ns.append(download_ns)
 
     def on_image(self, message):
-        # Discard initial frames after model readiness, before any timing or
-        # benchmark counters are updated. QoS depth bounds any queued backlog.
         if not self.ready or self.measurement_mode == "saturated":
             return
         key = frame_key(message) if self.trace_output_frames else None
+        # Record startup arrivals in the trace before excluding them from timing.
         if self.inference_trace is not None:
             write_observation(self.inference_trace, key, stage="arrival")
         self.last_camera_data_at = time.monotonic()
@@ -684,9 +683,9 @@ class InferenceNode(Node):
                 "publish_monotonic_ns": None,
             }
             self.frame_observations.append(observation)
-        published = False
+        publish_succeeded = False
         try:
-            started = time.perf_counter_ns()
+            pipeline_started_ns = time.perf_counter_ns()
             image = self.bridge.imgmsg_to_cv2(message, desired_encoding="rgb8")
             model_tensor = preprocess_image(
                 image,
@@ -716,10 +715,10 @@ class InferenceNode(Node):
             if key is not None:
                 tag_output(message_out, key)
             self.output_publisher.publish(message_out)
-            published = True
+            publish_succeeded = True
             if self.record_saved:
                 return
-            elapsed_ns = time.perf_counter_ns() - started
+            pipeline_elapsed_ns = time.perf_counter_ns() - pipeline_started_ns
             published_ros_ns = self.get_clock().now().nanoseconds
             callback_elapsed_ns = time.perf_counter_ns() - callback_started_ns
             if observation is not None:
@@ -739,7 +738,7 @@ class InferenceNode(Node):
                 self.record_warmup(inference_elapsed_ns)
                 return
 
-            self.latencies_ns.append(elapsed_ns)
+            self.latencies_ns.append(pipeline_elapsed_ns)
             self.onnxruntime_latencies_ns.append(inference_elapsed_ns)
             if cuda_timings is not None:
                 self.record_cuda_timings(cuda_timings)
@@ -755,7 +754,7 @@ class InferenceNode(Node):
             self.last_frame_error = f"{type(error).__name__}: {error}"
             self.get_logger().error(f"Inference failed: {error}")
         finally:
-            if published and self.inference_trace is not None:
+            if publish_succeeded and self.inference_trace is not None:
                 write_observation(self.inference_trace, key, stage="publish")
 
     def check_camera_data_timeout(self):
@@ -767,6 +766,26 @@ class InferenceNode(Node):
             f"{self.input_topic}. Start a camera publisher or use --emulate-camera."
         )
         rclpy.try_shutdown()
+
+    def mark_late_publishes(self, deadline_ns):
+        """Annotate frame observations and return the longest late-publish streak."""
+        consecutive_late_publishes = 0
+        max_consecutive_late_publishes = 0
+        for frame in self.frame_observations:
+            source_ns = frame["source_ros_ns"]
+            publish_ns = frame["publish_ros_ns"]
+            if source_ns and publish_ns and source_ns <= frame["arrival_ros_ns"] <= publish_ns:
+                frame["source_to_publish_deadline_missed"] = publish_ns - source_ns > deadline_ns
+            else:
+                frame["source_to_publish_deadline_missed"] = None
+            if frame["source_to_publish_deadline_missed"]:
+                consecutive_late_publishes += 1
+                max_consecutive_late_publishes = max(
+                    max_consecutive_late_publishes, consecutive_late_publishes
+                )
+            else:
+                consecutive_late_publishes = 0
+        return max_consecutive_late_publishes
 
     def save_record(self, input_shape, output_shape):
         device_type = device_name()
@@ -854,22 +873,7 @@ class InferenceNode(Node):
                         f"Observed input rate {observed_input_rate_hz:.2f} Hz was below "
                         f"95% of the expected wall rate {expected_wall_rate_hz:g} Hz"
                     )
-        consecutive_late_publishes = 0
-        max_consecutive_late_publishes = 0
-        for frame in self.frame_observations:
-            source_ns = frame["source_ros_ns"]
-            publish_ns = frame["publish_ros_ns"]
-            if source_ns and publish_ns and source_ns <= frame["arrival_ros_ns"] <= publish_ns:
-                frame["source_to_publish_deadline_missed"] = publish_ns - source_ns > deadline_ns
-            else:
-                frame["source_to_publish_deadline_missed"] = None
-            if frame["source_to_publish_deadline_missed"]:
-                consecutive_late_publishes += 1
-                max_consecutive_late_publishes = max(
-                    max_consecutive_late_publishes, consecutive_late_publishes
-                )
-            else:
-                consecutive_late_publishes = 0
+        max_consecutive_late_publishes = self.mark_late_publishes(deadline_ns)
         onnxruntime_timing = timing_stats(self.onnxruntime_latencies_ns)
         onnxruntime_deadline_misses = int(
             sum(1 for lat in self.onnxruntime_latencies_ns if lat > deadline_ns)

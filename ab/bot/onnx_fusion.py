@@ -51,23 +51,27 @@ def fold_conv_batchnorm(model):
         if (conv is None or conv.op_type != "Conv" or conv.domain not in ("", "ai.onnx")
                 or intermediate in outputs or consumers[intermediate] != 1):
             continue
-        weight_and_bias = [name for name in conv.input[1:] if name]
-        parameter_names = weight_and_bias + list(norm.input[1:])
-        if not all(name in constants for name in parameter_names):
+        weight_name = conv.input[1]
+        bias_name = conv.input[2] if len(conv.input) > 2 else ""
+        parameter_names = [weight_name, *norm.input[1:]]
+        if bias_name:
+            parameter_names.append(bias_name)
+        if any(name not in constants for name in parameter_names):
             continue
-        weights, *bias, scale, offset, mean, variance = [
-            numpy_helper.to_array(constants[name]) for name in parameter_names
+        weights = numpy_helper.to_array(constants[weight_name])
+        scale, offset, mean, variance = [
+            numpy_helper.to_array(constants[name]) for name in norm.input[1:]
         ]
+        bias = numpy_helper.to_array(constants[bias_name]) if bias_name else np.zeros_like(mean)
         if weights.dtype not in (np.float32, np.float64):
             continue
-        if any(value.shape != (weights.shape[0],) for value in (*bias, scale, offset, mean, variance)):
+        if any(value.shape != (weights.shape[0],) for value in (bias, scale, offset, mean, variance)):
             continue
 
         # BN(Conv(x)) = scale / sqrt(variance + epsilon) * (Conv(x) - mean) + offset.
         multiplier = scale / np.sqrt(variance + attributes.get("epsilon", 1e-5))
         fused_weights = weights * multiplier.reshape((-1,) + (1,) * (weights.ndim - 1))
-        fused_bias = (bias[0] if bias else np.zeros_like(mean)) - mean
-        fused_bias = fused_bias * multiplier + offset
+        fused_bias = (bias - mean) * multiplier + offset
         if not np.isfinite(fused_weights).all() or not np.isfinite(fused_bias).all():
             continue
 
@@ -100,8 +104,44 @@ def fold_conv_batchnorm(model):
     return len(removed)
 
 
+def _benchmark_feeds(session):
+    dtypes = {"tensor(float)": np.float32, "tensor(double)": np.float64}
+    inputs = session.get_inputs()
+    if any(item.type not in dtypes for item in inputs):
+        raise ValueError("Benchmark requires floating-point tensor inputs")
+
+    rng = np.random.default_rng(7)
+    feeds = []
+    for _ in range(8):
+        feed = {}
+        for item in inputs:
+            shape = [dimension if isinstance(dimension, int) else 1 for dimension in item.shape]
+            feed[item.name] = rng.standard_normal(shape).astype(dtypes[item.type])
+        feeds.append(feed)
+    return feeds
+
+
+def _measure_session(session, feeds, reference, samples):
+    # These validation calls also warm up the session before each timed repeat.
+    for feed, expected in zip(feeds, reference):
+        outputs = session.run(None, feed)
+        for actual, wanted in zip(outputs, expected, strict=True):
+            np.testing.assert_allclose(actual, wanted, rtol=1e-4, atol=1e-5)
+
+    timings = []
+    for sample in range(samples):
+        feed = feeds[sample % len(feeds)]
+        start = perf_counter_ns()
+        session.run(None, feed)
+        timings.append(perf_counter_ns() - start)
+    return {
+        "median_ms": median(timings) / 1e6,
+        "p99_ms": float(np.percentile(timings, 99)) / 1e6,
+    }
+
+
 def compare(original, folded, samples, repeats, thread_counts):
-    """Measure matched sessions after warm-up and check every output on fixed inputs."""
+    """Measure both graphs with the same inputs, session options and timing boundaries."""
     results = []
     reference = None
     for optimize in (False, True):
@@ -118,34 +158,13 @@ def compare(original, folded, samples, repeats, thread_counts):
                 for model in (str(original), folded)
             ]
             if reference is None:
-                rng = np.random.default_rng(7)
-                inputs = sessions[0].get_inputs()
-                if any(item.type not in ("tensor(float)", "tensor(double)") for item in inputs):
-                    raise ValueError("Benchmark requires floating-point tensor inputs")
-                feeds = [
-                    {item.name: rng.standard_normal([d if isinstance(d, int) else 1 for d in item.shape])
-                     .astype(np.float32 if item.type == "tensor(float)" else np.float64)
-                     for item in inputs}
-                    for _ in range(8)
-                ]
+                feeds = _benchmark_feeds(sessions[0])
                 reference = [sessions[0].run(None, feed) for feed in feeds]
             durations = [[], []]
             for run in range(repeats):
+                # Alternate which graph goes first so order does not favor one variant.
                 for index in (run % 2, 1 - run % 2):
-                    session = sessions[index]
-                    for feed, expected in zip(feeds, reference):
-                        for actual, wanted in zip(session.run(None, feed), expected, strict=True):
-                            np.testing.assert_allclose(actual, wanted, rtol=1e-4, atol=1e-5)
-                    timings = []
-                    for sample in range(samples):
-                        feed = feeds[sample % len(feeds)]
-                        start = perf_counter_ns()
-                        session.run(None, feed)
-                        timings.append(perf_counter_ns() - start)
-                    durations[index].append({
-                        "median_ms": median(timings) / 1e6,
-                        "p99_ms": float(np.percentile(timings, 99)) / 1e6,
-                    })
+                    durations[index].append(_measure_session(sessions[index], feeds, reference, samples))
             for variant, runs in zip(("original", "folded"), durations):
                 results.append({
                     "variant": variant, "ort_optimizations": optimize, "threads": threads,

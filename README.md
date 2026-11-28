@@ -427,21 +427,19 @@ The native synthetic publisher is used to avoid the Python serialization
 throughput limit for 640x480 ROS image messages. It uses the ROS image-tools
 publisher with reliable, keep-last QoS (depth 5), matched by the inference
 subscriber for synthetic streams, and remaps its `/image` topic to the
-configured input topic. Physical-camera subscriptions retain best-effort QoS.
-Its
-`dropped_frames` count estimates missed
-synthetic camera frames from gaps between received source timestamps; it is
-`null` for physical-camera runs, where the source frame rate is not configured.
-Synthetic runs allow up to 0.5% estimated timestamp-derived frame loss, provided
-the requested input-rate target is still met; larger losses invalidate the run.
-The estimated loss fraction and tolerance are recorded with the raw drop count.
-Runs whose GPU preflight
-exceeds configured utilization or memory limits. CPU timing runs are invalidated
-when the captured governor is `powersave` or a sampled temperature is at least
-85 C. Per-core frequency and utilization samples are collected during the
-measured window for diagnosis, rather than invalidating runs based on idle-core
-averages taken before or after inference. Invalidating conditions are recorded
-in `error_message`; these checks do not imply CUDA execution.
+configured input topic. Physical-camera subscriptions use best-effort QoS.
+
+The profiler estimates `dropped_frames` from gaps between source timestamps
+when it knows the expected camera rate. For a physical camera, set that rate
+with `--live-camera-rate-hz`. The field is `null` when the rate or timestamps
+needed for the estimate are unavailable. The run allows up to 0.5% estimated
+frame loss and also checks the observed input rate.
+
+GPU preflight can flag a run when utilization or memory use exceeds the
+configured limits. CPU timing runs are invalidated when the captured governor
+is `powersave` or a sampled temperature reaches 85 °C. Per-core frequency
+and utilization samples help explain timing variation. The report records
+failed checks in `error_message` and reports execution providers separately.
 
 ### Set the CPU frequency governor (Linux)
 
