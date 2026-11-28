@@ -289,16 +289,27 @@ aggregated = process_data(pd.read_csv(
 
 ## Convolution and Batch Normalization Fusion Experiment
 
-The normal exporter can already fold batch normalization. Export a separate
-baseline with exporter constant folding disabled, then run the standalone CPU
-comparison from the project environment:
+The normal exporter can already fold batch normalization. To test manual
+folding on MobileNetV3, export an unfused copy and keep the normal export as
+a separate baseline. Run these commands from the repository root with the
+dataset environment set up:
 
 ```bash
-python -m ab.bot.dataset_pipeline --model AirNet --dataset cifar-10 \
-    --export-only --preserve-batchnorm --onnx-dir _work/unfused-export
-python -m ab.bot.onnx_fusion _work/unfused-export/cifar-10/AirNet.onnx \
-    _work/unfused-export/cifar-10/AirNet-folded.onnx > fusion-comparison.json
+mkdir -p _work
+EXPERIMENT="$(mktemp -d _work/mobile-fusion-XXXXXX)"
+mkdir -p "$EXPERIMENT/folded"
+python -m ab.bot.dataset_pipeline --model MobileNetV3 --dataset cifar-10 \
+    --export-only --preserve-batchnorm --onnx-dir "$EXPERIMENT/unfused"
+python -m ab.bot.onnx_fusion "$EXPERIMENT/unfused/cifar-10/MobileNetV3.onnx" \
+    "$EXPERIMENT/folded/MobileNetV3.onnx" \
+    --threads 1 2 4 --samples 100 --repeats 3 > "$EXPERIMENT/fusion-comparison.json"
 ```
+
+Use `fusion-comparison.json` to check the number of pairs folded and compare each
+original/folded pair at the same thread count and runtime optimization setting.
+Keep the filename `MobileNetV3.onnx` in both folders so the model name matches
+the preprocessing manifest when you run the ROS node. Use the same manifest
+for both exports.
 
 The pass folds inference-only Conv–BatchNormalization pairs with constant
 parameters when the intermediate convolution output has no other consumer.
@@ -531,6 +542,114 @@ published without reaching the consumer. Select a source window after startup
 and warm-up so intentional startup drops are excluded. Trace logging adds
 work to the callback, so record whether it was enabled when comparing runs.
 
+### Run a camera-to-consumer benchmark without a robot
+
+Use three terminals from the repository root. In each terminal, source ROS 2
+and activate the same Python environment. Use an unused local ROS domain and
+set `MODEL_DIR` to the experiment directory printed by
+`printf '%s\n' "$EXPERIMENT"` in the fusion shell.
+
+```bash
+source /opt/ros/humble/setup.bash
+source .venv/bin/activate
+export ROS_LOCALHOST_ONLY=1 ROS_DOMAIN_ID=114
+MODEL_DIR=_work/mobile-fusion-REPLACE_ME
+RUN_DIR="$MODEL_DIR/runs/round-1-baseline-folded-t1"
+mkdir -p "$RUN_DIR"
+```
+
+Start the inference node in terminal 1. Wait for `[NN_BOT_READY]`:
+
+```bash
+python -m ab.bot.port --ros-args \
+    -p model_path:="$MODEL_DIR/folded/MobileNetV3.onnx" \
+    -p preprocessing_manifest:="$MODEL_DIR/unfused/cifar-10/MobileNetV3.preprocess.json" \
+    -p dataset:=cifar-10 -p results_dir:="$RUN_DIR" \
+    -p input_topic:=/benchmark/camera -p output_topic:=/benchmark/results \
+    -p onnx_execution_mode:=cpu -p onnx_num_threads:=1 \
+    -p camera_rate_hz:=30.0 -p startup_drop_frames:=0 -p warmup_runs:=20 \
+    -p iterations:=100 -p deadline_ms:=33.0 -p exit_after_benchmark:=false \
+    -p trace_output_frames:=true -p inference_trace_path:="$RUN_DIR/inference.jsonl"
+```
+
+Start the consumer in terminal 2, then start the camera publisher in terminal 3:
+
+```bash
+# Terminal 2
+python -m ab.bot.frame_trace listen /benchmark/results "$RUN_DIR/consumer.jsonl"
+
+# Terminal 3
+python -m ab.bot.synthetic_camera --ros-args \
+    -p image_topic:=/benchmark/camera -p publish_rate_hz:=30.0 \
+    -p width:=160 -p height:=120 \
+    -p source_trace_path:="$RUN_DIR/source.jsonl"
+```
+
+Let the camera run for at least 10 seconds and wait for the inference node to
+save its report. Stop the camera first, allow pending results to arrive, then
+stop the consumer and inference node with Ctrl+C to flush their logs. Score a
+fixed window that starts after the last warm-up inference. For example, use
+rows 31–230 if the first 30 source frames cover warm-up and at least 230 frames
+were published:
+
+```bash
+python -m ab.bot.frame_trace summarize "$RUN_DIR/source.jsonl" "$RUN_DIR/consumer.jsonl" \
+    --inference-log "$RUN_DIR/inference.jsonl" --first-frame 31 --last-frame 230 \
+    --deadline-ms 33 > "$RUN_DIR/camera-to-consumer.json"
+```
+
+Repeat with the unfused model at
+`"$MODEL_DIR/unfused/cifar-10/MobileNetV3.onnx"` and a fresh `RUN_DIR`. Keep
+the input, rate, deadline, and thread count fixed for a folding comparison.
+Use `onnxruntime_latency_ns.p99` in the ROS report for host inference and
+`camera_to_consumer_latency_ns.p99` in the trace summary for received results.
+Also compare `deadline_missed_frames`, which includes both late and missing
+results. The synthetic camera gives a controlled smoke test. For a recorded
+scene, use a replay publisher that logs every successfully published frame
+with the same frame key as described above.
+
+### Compare how configurations are selected
+
+`ab.bot.replay_selection` compares the setting with the lowest host p99
+against the setting with the fewest end-to-end misses. Use rounds 1 and 2
+to pick a configuration and reserve rounds 3 and 4 to evaluate it. Each round
+must include one report per configuration and condition. For example, repeat
+the run above for the `unfused` and `folded` exports with one and four threads
+under the same `baseline` condition.
+
+For each run, use the following command to combine the ROS report and trace
+summary. Pass the run directory, round number, condition, export variant,
+and thread count in that order:
+
+```bash
+python - "$RUN_DIR" 1 baseline folded 1 <<'PYTHON'
+import json
+from pathlib import Path
+import sys
+
+run_dir, round_number, condition, variant, threads = sys.argv[1:]
+folder = Path(run_dir)
+ros = json.loads(next(folder.glob("MobileNetV3/robot_*.json")).read_text())
+trace = json.loads((folder / "camera-to-consumer.json").read_text())
+record = {
+    "round": int(round_number), "condition": condition, "variant": variant,
+    "threads": int(threads), "frames": trace["source_frames"],
+    "missing": trace["missing_frames"], "late": trace["late_received_frames"],
+    "deadline_misses": trace["deadline_missed_frames"],
+    "host_p99_ms": ros["onnxruntime_latency_ns"]["p99"] / 1e6,
+    "consumer_p99_ms": trace["camera_to_consumer_latency_ns"]["p99"] / 1e6,
+}
+(folder / "result.json").write_text(json.dumps(record, indent=2) + "\n")
+PYTHON
+
+# After completing every run in rounds 1 through 4
+python -m ab.bot.replay_selection --calibration 1 2 --holdout 3 4 -- \
+    "$MODEL_DIR"/runs/round-*/result.json > "$MODEL_DIR/selector-comparison.json"
+```
+
+Compare the two `holdout` results in `selector-comparison.json`. If both
+rules select the same configuration, they evaluate the same held-out runs.
+
 To verify the trace without a robot, source ROS 2 and run the fault-injection
 test on an unused local ROS domain:
 
@@ -652,9 +771,15 @@ it when required by the model.
 
 ## Tests
 
-The preprocessing and timing tests need only NumPy and run without ROS 2 or a
-robot:
+Run the test suite with pytest from the project environment:
 
 ```bash
-python3 -m unittest discover -s tests
+python -m pytest -q
+```
+
+To include the ROS fault-injection test, source ROS 2 and use an unused local
+domain:
+
+```bash
+ROS_LOCALHOST_ONLY=1 ROS_DOMAIN_ID=108 NN_BOT_RUN_ROS_TESTS=1 python -m pytest -q
 ```
